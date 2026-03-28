@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+
+  <url>
+    <loc>https://ki-fsqn.onrender.com/news-1.html</loc>
+    <news:news>
+      <news:publication>
+        <news:name>اسم موقعك الإخباري</news:name>
+        <news:language>ar</news:language>
+      </news:publication>
+      <news:publication_date>2026-03-29T01:30:00+00:00</news:publication_date>
+      <news:title>عنوان الخبر العاجل الأول هنا</news:title>
+    </news:news>
+    <image:image>
+      <image:loc>https://ki-fsqn.onrender.com/gooh1.jpg</image:loc>
+      <image:title>وصف صورة الخبر الأول</image:title>
+    </image:image>
+  </url>
+
+  <url>
+    <loc>https://ki-fsqn.onrender.com/news-2.html</loc>
+    <news:news>
+      <news:publication>
+        <news:name>اسم موقعك الإخباري</news:name>
+        <news:language>ar</news:language>
+      </news:publication>
+      <news:publication_date>2026-03-29T01:35:00+00:00</news:publication_date>
+      <news:title>عنوان الخبر العاجل الثاني هنا</news:title>
+    </news:news>
+    <image:image>
+      <image:loc>https://ki-fsqn.onrender.com/gooh2.jpg</image:loc>
+      <image:title>وصف صورة الخبر الثاني</image:title>
+    </image:image>
+  </url>
+
+</urlset>
