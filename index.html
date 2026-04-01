@@ -18,30 +18,29 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+        }
 
-        html, body {
+        /* 🔥 التعديل الأساسي لجعل الموقع يملأ الشاشة بالكامل */
+        html {
             width: 100%;
-            height: 100%;
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
+            height: -webkit-fill-available;
         }
 
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background: #000000;
             color: #ffffff;
-            overflow-y: auto;
             overflow-x: hidden;
-            height: 100%;
+            overflow-y: auto;
             width: 100%;
+            min-height: 100vh;
+            min-height: -webkit-fill-available;
             -webkit-overflow-scrolling: touch;
+            position: relative;
         }
 
         *:focus { outline: none; }
@@ -52,12 +51,12 @@
             color: #111111;
         }
         body.light-mode .top-bar {
-            background: rgba(245,247,249,0.85);
+            background: rgba(245,247,249,0.95);
             backdrop-filter: blur(20px);
             border-bottom-color: rgba(0,0,0,0.08);
         }
         body.light-mode .bottom-nav {
-            background: rgba(245,247,249,0.85);
+            background: rgba(245,247,249,0.95);
             backdrop-filter: blur(20px);
             border-top-color: rgba(0,0,0,0.08);
         }
@@ -161,26 +160,29 @@
         /* Main App */
         #mainApp { 
             display: none; 
-            min-height: 100vh; 
+            min-height: 100vh;
+            min-height: -webkit-fill-available;
             background: #000000; 
             overflow-y: auto; 
             overflow-x: hidden;
-            height: 100%;
             width: 100%;
+            position: relative;
         }
 
-        /* Top Bar - شفاف */
+        /* Top Bar */
         .top-bar {
             position: sticky;
             top: 0;
-            background: rgba(0,0,0,0.65);
-            backdrop-filter: blur(16px);
-            border-bottom: 1px solid rgba(255,255,255,0.06);
-            padding: 10px 16px;
+            background: rgba(0,0,0,0.85);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            padding: 12px 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             z-index: 100;
+            /* دعم للمسافات الآمنة في الهواتف */
+            padding-top: max(12px, env(safe-area-inset-top));
         }
         .logo {
             font-size: 22px;
@@ -220,10 +222,10 @@
         }
 
         /* Feed */
-        .feed-container { padding: 0 0 65px; }
+        .feed-container { padding: 0 0 70px; }
         .tweet-card {
             background: #000000;
-            border-bottom: 1px solid rgba(255,255,255,0.06);
+            border-bottom: 1px solid rgba(255,255,255,0.08);
             padding: 14px 16px;
             transition: background 0.2s;
             cursor: pointer;
@@ -580,18 +582,18 @@
         .chat-input-area input { flex: 1; padding: 10px 14px; border: 1px solid #2f3336; border-radius: 40px; background: #1a1a1a; color: white; outline: none; font-size: 13px; }
         .chat-input-area button { background: none; border: none; color: #1d9bf0; font-size: 18px; cursor: pointer; padding: 6px; }
 
-        /* Bottom Nav - شفاف وصغير */
+        /* Bottom Nav */
         .bottom-nav {
             position: fixed;
             bottom: 0;
             left: 0;
             right: 0;
-            background: rgba(0,0,0,0.65);
+            background: rgba(0,0,0,0.85);
             backdrop-filter: blur(20px);
-            border-top: 1px solid rgba(255,255,255,0.06);
+            border-top: 1px solid rgba(255,255,255,0.08);
             display: flex;
             justify-content: space-around;
-            padding: 6px 0 12px;
+            padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
             z-index: 100;
         }
         .nav-item {
@@ -1026,40 +1028,48 @@
 <script type="module" src="script.js"></script>
 
 <script>
-    // Fullscreen Mode
+    // ✅ Fullscreen Mode - يجعل الموقع يملأ الشاشة بالكامل
     (function() {
-        let lastScrollTop = 0;
-        let urlBarHidden = false;
-        
-        function requestFullscreen() {
+        // دالة لتطبيق الوضع الكامل
+        function applyFullscreen() {
             const docEl = document.documentElement;
-            if (docEl.requestFullscreen) docEl.requestFullscreen();
-            else if (docEl.webkitRequestFullscreen) docEl.webkitRequestFullscreen();
-            else if (docEl.msRequestFullscreen) docEl.msRequestFullscreen();
+            if (docEl.requestFullscreen) {
+                docEl.requestFullscreen().catch(() => {});
+            } else if (docEl.webkitRequestFullscreen) {
+                docEl.webkitRequestFullscreen();
+            } else if (docEl.msRequestFullscreen) {
+                docEl.msRequestFullscreen();
+            }
         }
         
+        // تفعيل الوضع الكامل عند التمرير لأعلى
+        let lastScrollTop = 0;
         window.addEventListener('scroll', function() {
             const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-            if (scrollTop > lastScrollTop && scrollTop > 80) {
-                if (!urlBarHidden) {
-                    requestFullscreen();
-                    urlBarHidden = true;
-                }
-            } else if (scrollTop < lastScrollTop && scrollTop < 40) {
-                urlBarHidden = false;
+            if (scrollTop > 80 && !document.fullscreenElement) {
+                applyFullscreen();
             }
             lastScrollTop = scrollTop <= 0 ? 0 : scrollTop;
         });
         
+        // فتح الصور في المودال
         document.addEventListener('click', function(e) {
             const img = e.target.closest('.tweet-media img');
             if (img && img.src) {
                 e.preventDefault();
                 e.stopPropagation();
-                openImageModal(img.src);
+                const modal = document.getElementById('imageModal');
+                const modalImg = document.getElementById('modalImage');
+                modalImg.src = img.src;
+                modal.classList.add('open');
             }
         });
     })();
+    
+    // دالة مساعدة لإغلاق المودال
+    window.closeImageModal = function() {
+        document.getElementById('imageModal').classList.remove('open');
+    }
 </script>
 
 </body>
