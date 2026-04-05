@@ -1,182 +1,59 @@
-import { auth, db, ref, push, set, onValue, update, get, child, remove, CLOUD_NAME, UPLOAD_PRESET } from './firebase-config.js';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js";
-
-// ========== GLOBAL VARIABLES ==========
+// ==================== XSphere - المتغيرات العامة ====================
 let currentUser = null;
-let currentUserData = null;
-let allUsers = {};
-let allPosts = [];
-let allStories = [];
+let currentPostId = null;
+let currentChatUser = null;
+let currentProfileUser = null;
 let selectedMediaFile = null;
-let currentChatUserId = null;
-let viewingProfileUserId = null;
-let currentPostForComments = null;
+let currentTweetId = null;
+let typingTimeout = null;
+let currentReportPostId = null;
+let selectedReportReason = null;
+let readModeActive = false;
+let hideLikesActive = false;
+
+// ==================== Voice Recording Variables ====================
 let mediaRecorder = null;
 let audioChunks = [];
-let bookmarks = {};
+let isRecording = false;
 
-const ADMIN_EMAILS = ['jasim28v@gmail.com'];
-let isAdmin = false;
+// ==================== Infinite Scroll Variables ====================
+let allTweetsCache = [];
+let currentDisplayCount = 0;
+let isLoadingMore = false;
+let hasMoreTweets = true;
+let scrollListenerActive = true;
+const TWEETS_PER_BATCH = 8;
 
-// ========== AUTH ==========
-window.switchAuth = function(type) {
-    const forms = document.querySelectorAll('.auth-form');
-    forms.forEach(f => f.classList.remove('active'));
-    document.getElementById(type === 'login' ? 'loginForm' : 'registerForm').classList.add('active');
-};
+// ==================== Agora Variables ====================
+let agoraClient = null;
+let localTracks = { videoTrack: null, audioTrack: null };
+let isCallActive = false;
 
-window.login = async function() {
-    const email = document.getElementById('loginEmail').value;
-    const password = document.getElementById('loginPassword').value;
-    const msg = document.getElementById('loginMsg');
-    if (!email || !password) { msg.innerText = 'الرجاء ملء جميع الحقول'; return; }
-    msg.innerText = 'جاري تسجيل الدخول...';
-    try {
-        await signInWithEmailAndPassword(auth, email, password);
-        msg.innerText = '';
-    } catch (error) {
-        if (error.code === 'auth/user-not-found') msg.innerText = 'لا يوجد حساب بهذا البريد';
-        else if (error.code === 'auth/wrong-password') msg.innerText = 'كلمة المرور غير صحيحة';
-        else msg.innerText = 'حدث خطأ: ' + error.message;
-    }
-};
+// ==================== Bad Words ====================
+let badWordsList = [];
 
-window.register = async function() {
-    const name = document.getElementById('regName').value;
-    const email = document.getElementById('regEmail').value;
-    const password = document.getElementById('regPass').value;
-    const confirmPass = document.getElementById('regConfirmPass').value;
-    const msg = document.getElementById('regMsg');
-    if (!name || !email || !password || !confirmPass) { msg.innerText = 'املأ جميع الحقول'; return; }
-    if (password.length < 6) { msg.innerText = 'كلمة المرور 6 أحرف على الأقل'; return; }
-    if (password !== confirmPass) { msg.innerText = 'كلمة المرور غير متطابقة'; return; }
-    msg.innerText = 'جاري إنشاء الحساب...';
-    try {
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        await set(ref(db, `users/${userCredential.user.uid}`), {
-            name, email, bio: '', avatarUrl: '', coverUrl: '', followers: {}, following: {}, bookmarks: {}, createdAt: Date.now()
-        });
-        msg.innerText = '';
-    } catch (error) {
-        if (error.code === 'auth/email-already-in-use') msg.innerText = 'البريد الإلكتروني مستخدم بالفعل';
-        else msg.innerText = 'حدث خطأ: ' + error.message;
-    }
-};
-
-window.logout = function() { signOut(auth); location.reload(); };
-
-// ========== DATA LOADING ==========
-async function loadUserData() {
-    const snap = await get(child(ref(db), `users/${currentUser.uid}`));
-    if (snap.exists()) currentUserData = { uid: currentUser.uid, ...snap.val() };
-    if (currentUserData?.bookmarks) bookmarks = currentUserData.bookmarks;
+// ==================== Helper Functions ====================
+function showToast(message, duration = 2000) {
+    const toast = document.getElementById('customToast');
+    if (!toast) return;
+    toast.textContent = message;
+    toast.style.opacity = '1';
+    setTimeout(() => {
+        toast.style.opacity = '0';
+    }, duration);
 }
 
-onValue(ref(db, 'users'), (s) => { allUsers = s.val() || {}; });
-
-// ========== MEDIA UPLOAD ==========
-async function uploadMedia(file) {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('upload_preset', UPLOAD_PRESET);
-    let resourceType = 'image';
-    if (file.type.startsWith('video/')) resourceType = 'video';
-    else if (file.type.startsWith('audio/')) resourceType = 'raw';
-    formData.append('resource_type', resourceType);
-    const url = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/${resourceType}/upload`;
-    const response = await fetch(url, { method: 'POST', body: formData });
-    const data = await response.json();
-    return { url: data.secure_url, type: resourceType === 'raw' ? 'audio' : resourceType };
-}
-
-// ========== OPEN IMAGE MODAL ==========
-window.openImageModal = function(imageUrl) {
-    const modal = document.getElementById('imageModal');
-    const modalImg = document.getElementById('modalImage');
-    modalImg.src = imageUrl;
-    modal.classList.add('open');
-};
-
-window.closeImageModal = function() {
-    const modal = document.getElementById('imageModal');
-    modal.classList.remove('open');
-};
-
-// ========== POSTS ==========
-onValue(ref(db, 'posts'), (s) => {
-    const data = s.val();
-    if (!data) { allPosts = []; renderFeed(); return; }
-    allPosts = [];
-    Object.keys(data).forEach(key => allPosts.push({ id: key, ...data[key] }));
-    allPosts.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    renderFeed();
-});
-
-function renderFeed() {
-    const container = document.getElementById('feedContainer');
-    if (!container) return;
-    container.innerHTML = '';
-    if (allPosts.length === 0) {
-        container.innerHTML = '<div class="loading"><div class="spinner"></div><span>لا توجد منشورات بعد</span></div>';
-        return;
-    }
-    allPosts.forEach(post => {
-        const user = allUsers[post.sender] || { name: post.senderName || 'مستخدم', avatarUrl: '' };
-        const isLiked = post.likedBy && post.likedBy[currentUser?.uid];
-        const isRetweeted = post.retweetedBy && post.retweetedBy[currentUser?.uid];
-        const isBookmarked = bookmarks[post.id];
-        const commentsCount = post.comments ? Object.keys(post.comments).length : 0;
-        const retweetCount = post.retweets ? Object.keys(post.retweets).length : 0;
-        
-        let mediaHtml = '';
-        if (post.mediaUrl) {
-            if (post.mediaType === 'image') {
-                mediaHtml = `<div class="tweet-media" onclick="event.stopPropagation(); openImageModal('${post.mediaUrl}')"><img src="${post.mediaUrl}" loading="lazy" class="cursor-pointer"></div>`;
-            } else if (post.mediaType === 'video') {
-                mediaHtml = `<div class="tweet-media" onclick="event.stopPropagation()"><video controls src="${post.mediaUrl}"></video></div>`;
-            } else if (post.mediaType === 'audio') {
-                mediaHtml = `<div class="tweet-media" onclick="event.stopPropagation()"><audio controls src="${post.mediaUrl}"></audio></div>`;
-            }
-        }
-        
-        let quoteHtml = '';
-        if (post.quotePostId && post.quotePostData) {
-            const quoteUser = allUsers[post.quotePostData.sender] || { name: 'مستخدم', avatarUrl: '' };
-            quoteHtml = `
-                <div class="mt-3 border border-[rgba(255,255,255,0.08)] rounded-2xl p-3 cursor-pointer" onclick="event.stopPropagation(); openCommentsModal('${post.quotePostId}')">
-                    <div class="flex gap-2 items-center mb-2">
-                        <div class="w-6 h-6 rounded-full bg-[#1d9bf0] overflow-hidden">${quoteUser.avatarUrl ? `<img src="${quoteUser.avatarUrl}">` : quoteUser.name?.charAt(0)}</div>
-                        <span class="font-bold text-sm">${escapeHtml(quoteUser.name)}</span>
-                        <span class="text-xs text-gray-500">@${quoteUser.name?.toLowerCase().replace(/\s/g, '')}</span>
-                    </div>
-                    <div class="text-sm">${escapeHtml(post.quotePostData.text?.substring(0, 100) || '')}</div>
-                </div>
-            `;
-        }
-        
-        const div = document.createElement('div');
-        div.className = 'tweet-card';
-        div.onclick = () => openCommentsModal(post.id);
-        div.innerHTML = `
-            <div class="tweet-header">
-                <div class="tweet-avatar" onclick="event.stopPropagation(); viewProfile('${post.sender}')">${user.avatarUrl ? `<img src="${user.avatarUrl}">` : (user.name?.charAt(0) || '👤')}</div>
-                <div style="flex:1">
-                    <div><span class="tweet-name" onclick="event.stopPropagation(); viewProfile('${post.sender}')">${escapeHtml(user.name)}</span><span class="tweet-username mx-1">@${user.name?.toLowerCase().replace(/\s/g, '')}</span><span class="tweet-time">· ${new Date(post.timestamp).toLocaleString()}</span></div>
-                    <div class="tweet-content">${escapeHtml(post.text || '')}</div>
-                    ${mediaHtml}
-                    ${quoteHtml}
-                </div>
-            </div>
-            <div class="tweet-actions" onclick="event.stopPropagation()">
-                <button class="tweet-action" onclick="openCommentsModal('${post.id}')"><i class="far fa-comment"></i> <span>${commentsCount}</span></button>
-                <button class="tweet-action ${isRetweeted ? 'active' : ''}" onclick="toggleRetweet('${post.id}', this)"><i class="fas fa-retweet"></i> <span>${retweetCount}</span></button>
-                <button class="tweet-action ${isLiked ? 'active' : ''}" onclick="toggleLike('${post.id}', this)"><i class="fas fa-heart"></i> <span>${post.likes || 0}</span></button>
-                <button class="tweet-action ${isBookmarked ? 'active' : ''}" onclick="toggleBookmark('${post.id}', this)"><i class="fas fa-bookmark"></i></button>
-                <button class="tweet-action" onclick="openQuoteModal('${post.id}')"><i class="fas fa-quote-right"></i></button>
-            </div>
-        `;
-        container.appendChild(div);
-    });
+function formatTime(timestamp) {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    if (days > 0) return `${days} يوم`;
+    if (hours > 0) return `${hours} ساعة`;
+    if (minutes > 0) return `${minutes} دقيقة`;
+    return `${seconds} ثانية`;
 }
 
 function escapeHtml(text) {
@@ -186,927 +63,1474 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// ========== POST ACTIONS ==========
-window.openCompose = function() { 
-    document.getElementById('composePanel').classList.add('open'); 
-    document.getElementById('backBtn').style.display = 'flex';
-    resetCompose();
-};
-window.closeCompose = function() { 
-    document.getElementById('composePanel').classList.remove('open'); 
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
-
-function resetCompose() {
-    document.getElementById('postText').value = '';
-    document.getElementById('mediaPreview').innerHTML = '';
-    document.getElementById('mediaPreview').style.display = 'none';
-    selectedMediaFile = null;
-    document.getElementById('postImage').value = '';
-    document.getElementById('postVideo').value = '';
-    document.getElementById('postStatus').innerHTML = '';
+function extractHashtags(text) {
+    const hashtags = text.match(/#[\w\u0600-\u06FF]+/g) || [];
+    return hashtags.map(tag => tag.substring(1));
 }
 
-window.previewMedia = function(input, type) {
+function containsBadWords(text) {
+    if (!text || badWordsList.length === 0) return false;
+    const lowerText = text.toLowerCase();
+    for (const word of badWordsList) {
+        if (lowerText.includes(word.toLowerCase())) return true;
+    }
+    return false;
+}
+
+function filterBadWords(text) {
+    if (!text || badWordsList.length === 0) return text;
+    let filtered = text;
+    for (const word of badWordsList) {
+        const regex = new RegExp(word, 'gi');
+        filtered = filtered.replace(regex, '*'.repeat(word.length));
+    }
+    return filtered;
+}
+
+// ==================== Media Viewer (صور وفيديو) ====================
+function openMediaViewer(url, type) {
+    const modal = document.getElementById('mediaViewerModal');
+    const viewerImage = document.getElementById('viewerImage');
+    const viewerVideo = document.getElementById('viewerVideo');
+    
+    if (type === 'image') {
+        viewerImage.style.display = 'block';
+        viewerVideo.style.display = 'none';
+        viewerImage.src = url;
+        viewerVideo.pause();
+    } else if (type === 'video') {
+        viewerImage.style.display = 'none';
+        viewerVideo.style.display = 'block';
+        viewerVideo.src = url;
+        viewerVideo.load();
+        viewerVideo.play();
+    }
+    
+    modal.classList.add('open');
+}
+
+function closeMediaViewer() {
+    const modal = document.getElementById('mediaViewerModal');
+    const viewerVideo = document.getElementById('viewerVideo');
+    viewerVideo.pause();
+    modal.classList.remove('open');
+}
+
+// ==================== Upload to Cloudinary ====================
+async function uploadToCloudinary(file, onProgress) {
+    const url = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/upload`;
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('upload_preset', UPLOAD_PRESET);
+    
+    try {
+        const response = await fetch(url, { method: 'POST', body: formData });
+        const data = await response.json();
+        if (data.secure_url) return data.secure_url;
+        throw new Error('Upload failed');
+    } catch (error) {
+        console.error('Cloudinary error:', error);
+        showToast('فشل رفع الملف');
+        return null;
+    }
+}
+
+// ==================== Voice Recording ====================
+async function startVoiceRecording() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        
+        mediaRecorder.ondataavailable = (event) => {
+            audioChunks.push(event.data);
+        };
+        
+        mediaRecorder.onstop = async () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            const audioUrl = await uploadToCloudinary(audioBlob);
+            
+            if (audioUrl && currentChatUser) {
+                const chatId = getChatId(currentUser.uid, currentChatUser.uid);
+                await db.ref(`chats/${chatId}`).push({
+                    senderId: currentUser.uid,
+                    audioUrl: audioUrl,
+                    timestamp: Date.now(),
+                    read: false
+                });
+                showToast('🎤 تم إرسال الرسالة الصوتية');
+                loadChatMessages(currentChatUser.uid);
+            }
+            
+            stream.getTracks().forEach(track => track.stop());
+            document.getElementById('recordingIndicator').classList.remove('active');
+        };
+        
+        mediaRecorder.start();
+        isRecording = true;
+        document.getElementById('recordingIndicator').classList.add('active');
+        showToast('🔴 جاري التسجيل... اضغط مرة أخرى للإيقاف');
+    } catch (error) {
+        console.error('Recording error:', error);
+        showToast('❌ لا يمكن الوصول إلى الميكروفون');
+    }
+}
+
+function stopVoiceRecording() {
+    if (mediaRecorder && isRecording) {
+        mediaRecorder.stop();
+        isRecording = false;
+    }
+}
+
+function toggleVoiceRecording() {
+    if (isRecording) {
+        stopVoiceRecording();
+    } else {
+        startVoiceRecording();
+    }
+}
+
+// ==================== Upload Avatar ====================
+async function uploadAvatar(input) {
     const file = input.files[0];
     if (!file) return;
-    selectedMediaFile = file;
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        const mediaPreview = document.getElementById('mediaPreview');
-        if (type === 'image') mediaPreview.innerHTML = `<img src="${e.target.result}" class="max-h-64 rounded-2xl">`;
-        else if (type === 'video') mediaPreview.innerHTML = `<video controls class="max-h-64 rounded-2xl"><source src="${e.target.result}"></video>`;
-        mediaPreview.style.display = 'block';
-    };
-    reader.readAsDataURL(file);
-};
+    
+    showToast('🔄 جاري رفع الصورة...');
+    const url = await uploadToCloudinary(file);
+    if (url) {
+        await db.ref(`users/${currentUser.uid}`).update({ avatar: url });
+        currentUser.avatar = url;
+        
+        const avatarDiv = document.getElementById('currentUserAvatar');
+        if (avatarDiv) avatarDiv.innerHTML = `<img src="${url}">`;
+        
+        const editAvatarDiv = document.getElementById('editAvatar');
+        if (editAvatarDiv) editAvatarDiv.innerHTML = `<img src="${url}"><div class="avatar-overlay"><i class="fa-solid fa-camera"></i></div>`;
+        
+        showToast('✅ تم تغيير الصورة الشخصية بنجاح');
+        
+        if (currentProfileUser === currentUser.uid) {
+            openProfile(currentUser.uid);
+        }
+    }
+}
 
-window.startAudioRecording = async function() {
-    const btn = document.getElementById('audioRecordBtn');
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-        btn.innerHTML = '<i class="fas fa-microphone"></i>';
+// ==================== Tweet Media Handling ====================
+let tweetMediaFile = null;
+
+function handleTweetMedia(input, type) {
+    const file = input.files[0];
+    if (file) {
+        tweetMediaFile = file;
+        const previewDiv = document.getElementById('mediaPreview');
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            if (type === 'image') {
+                previewDiv.innerHTML = `<div class="preview-container"><img src="${e.target.result}"><div class="remove-media" onclick="removeTweetMedia()"><i class="fa-solid fa-xmark"></i></div></div>`;
+            } else if (type === 'video') {
+                previewDiv.innerHTML = `<div class="preview-container"><video src="${e.target.result}" controls></video><div class="remove-media" onclick="removeTweetMedia()"><i class="fa-solid fa-xmark"></i></div></div>`;
+            }
+            previewDiv.classList.add('active');
+        };
+        reader.readAsDataURL(file);
+    }
+}
+
+function handleComposeMedia(input, type) {
+    const file = input.files[0];
+    if (file) {
+        tweetMediaFile = file;
+        const previewDiv = document.getElementById('composeMediaPreview');
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            if (type === 'image') {
+                previewDiv.innerHTML = `<div class="preview-container"><img src="${e.target.result}"><div class="remove-media" onclick="removeComposeMedia()"><i class="fa-solid fa-xmark"></i></div></div>`;
+            } else if (type === 'video') {
+                previewDiv.innerHTML = `<div class="preview-container"><video src="${e.target.result}" controls></video><div class="remove-media" onclick="removeComposeMedia()"><i class="fa-solid fa-xmark"></i></div></div>`;
+            }
+            previewDiv.classList.add('active');
+        };
+        reader.readAsDataURL(file);
+    }
+}
+
+function removeTweetMedia() {
+    tweetMediaFile = null;
+    const previewDiv = document.getElementById('mediaPreview');
+    previewDiv.innerHTML = '';
+    previewDiv.classList.remove('active');
+    document.getElementById('tweetImage').value = '';
+    document.getElementById('tweetVideo').value = '';
+}
+
+function removeComposeMedia() {
+    tweetMediaFile = null;
+    const previewDiv = document.getElementById('composeMediaPreview');
+    previewDiv.innerHTML = '';
+    previewDiv.classList.remove('active');
+    document.getElementById('composeImage').value = '';
+    document.getElementById('composeVideo').value = '';
+}
+
+// ==================== Create Tweet ====================
+async function createTweet() {
+    let text = document.getElementById('tweetText')?.value;
+    if (!text && !tweetMediaFile) return showToast('⚠️ الرجاء كتابة نص أو إضافة وسائط');
+    if (containsBadWords(text)) return showToast('⚠️ التغريدة تحتوي على كلمات ممنوعة');
+    text = filterBadWords(text);
+    
+    let mediaUrl = "", mediaType = "";
+    if (tweetMediaFile) {
+        mediaType = tweetMediaFile.type.split('/')[0];
+        mediaUrl = await uploadToCloudinary(tweetMediaFile);
+        if (!mediaUrl) return;
+    }
+    
+    const hashtags = extractHashtags(text);
+    const tweetRef = db.ref('tweets').push();
+    
+    await tweetRef.set({
+        id: tweetRef.key,
+        userId: currentUser.uid,
+        userName: currentUser.displayName || currentUser.name,
+        userAvatar: currentUser.avatar || "",
+        text: text,
+        mediaUrl: mediaUrl,
+        mediaType: mediaType,
+        hashtags: hashtags,
+        likes: {},
+        retweets: {},
+        commentsCount: 0,
+        views: 0,
+        timestamp: Date.now()
+    });
+    
+    for (const tag of hashtags) {
+        await db.ref(`hashtags/${tag.toLowerCase()}/${tweetRef.key}`).set(true);
+    }
+    
+    document.getElementById('tweetText').value = "";
+    removeTweetMedia();
+    await refreshFeedCache();
+    loadTrendingHashtags();
+    showToast('✅ تم نشر التغريدة بنجاح!');
+}
+
+async function submitComposeTweet() {
+    let text = document.getElementById('composeText')?.value;
+    if (!text && !tweetMediaFile) return showToast('⚠️ الرجاء كتابة نص أو إضافة وسائط');
+    if (containsBadWords(text)) return showToast('⚠️ التغريدة تحتوي على كلمات ممنوعة');
+    text = filterBadWords(text);
+    
+    let mediaUrl = "", mediaType = "";
+    if (tweetMediaFile) {
+        mediaType = tweetMediaFile.type.split('/')[0];
+        mediaUrl = await uploadToCloudinary(tweetMediaFile);
+        if (!mediaUrl) return;
+    }
+    
+    const hashtags = extractHashtags(text);
+    const tweetRef = db.ref('tweets').push();
+    
+    await tweetRef.set({
+        id: tweetRef.key,
+        userId: currentUser.uid,
+        userName: currentUser.displayName || currentUser.name,
+        userAvatar: currentUser.avatar || "",
+        text: text,
+        mediaUrl: mediaUrl,
+        mediaType: mediaType,
+        hashtags: hashtags,
+        likes: {},
+        retweets: {},
+        commentsCount: 0,
+        views: 0,
+        timestamp: Date.now()
+    });
+    
+    for (const tag of hashtags) {
+        await db.ref(`hashtags/${tag.toLowerCase()}/${tweetRef.key}`).set(true);
+    }
+    
+    document.getElementById('composeText').value = "";
+    removeComposeMedia();
+    closeCompose();
+    await refreshFeedCache();
+    loadTrendingHashtags();
+    showToast('✅ تم نشر التغريدة بنجاح!');
+}
+
+// ==================== Delete Tweet ====================
+async function deleteTweet(tweetId) {
+    if (!confirm('⚠️ هل أنت متأكد من حذف هذه التغريدة؟')) return;
+    const tweetSnapshot = await db.ref(`tweets/${tweetId}`).once('value');
+    const tweet = tweetSnapshot.val();
+    if (tweet.userId !== currentUser.uid && !currentUser.isAdmin) return showToast('❌ لا يمكنك حذف تغريدة ليست لك');
+    if (tweet.hashtags) {
+        for (const tag of tweet.hashtags) {
+            await db.ref(`hashtags/${tag.toLowerCase()}/${tweetId}`).remove();
+        }
+    }
+    await db.ref(`tweets/${tweetId}`).remove();
+    await refreshFeedCache();
+    loadTrendingHashtags();
+    showToast('🗑️ تم حذف التغريدة');
+}
+
+// ==================== Like Tweet ====================
+async function likeTweet(tweetId) {
+    const likeRef = db.ref(`tweets/${tweetId}/likes/${currentUser.uid}`);
+    const snapshot = await likeRef.once('value');
+    const wasLiked = snapshot.exists();
+    
+    if (wasLiked) {
+        await likeRef.remove();
+    } else {
+        await likeRef.set(true);
+        const tweetSnapshot = await db.ref(`tweets/${tweetId}`).once('value');
+        const tweet = tweetSnapshot.val();
+        if (tweet && tweet.userId !== currentUser.uid) {
+            await db.ref(`notifications/${tweet.userId}`).push({
+                type: 'like',
+                userId: currentUser.uid,
+                userName: currentUser.displayName || currentUser.name,
+                tweetId: tweetId,
+                timestamp: Date.now(),
+                read: false
+            });
+        }
+    }
+    refreshFeedCache();
+}
+
+// ==================== Retweet ====================
+async function retweet(tweetId) {
+    const retweetRef = db.ref(`tweets/${tweetId}/retweets/${currentUser.uid}`);
+    const snapshot = await retweetRef.once('value');
+    const wasRetweeted = snapshot.exists();
+    
+    if (wasRetweeted) {
+        await retweetRef.remove();
+        showToast('↩️ تم إلغاء إعادة التغريد');
+    } else {
+        await retweetRef.set(true);
+        showToast('🔄 تم إعادة التغريد');
+        const tweetSnapshot = await db.ref(`tweets/${tweetId}`).once('value');
+        const tweet = tweetSnapshot.val();
+        if (tweet && tweet.userId !== currentUser.uid) {
+            await db.ref(`notifications/${tweet.userId}`).push({
+                type: 'retweet',
+                userId: currentUser.uid,
+                userName: currentUser.displayName || currentUser.name,
+                tweetId: tweetId,
+                timestamp: Date.now(),
+                read: false
+            });
+        }
+    }
+    refreshFeedCache();
+}
+
+// ==================== Comments ====================
+async function openComments(tweetId) {
+    currentTweetId = tweetId;
+    document.getElementById('commentsModal').classList.add('open');
+    await loadComments(tweetId);
+}
+
+function closeCommentsModal() {
+    document.getElementById('commentsModal').classList.remove('open');
+    currentTweetId = null;
+}
+
+async function loadComments(tweetId) {
+    const snapshot = await db.ref(`comments/${tweetId}`).once('value');
+    const comments = snapshot.val();
+    const container = document.getElementById('commentsList');
+    if (!comments) {
+        container.innerHTML = '<div style="text-align: center; padding: 20px; color: #536471;">لا توجد تعليقات بعد</div>';
         return;
     }
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
-        audioChunks = [];
-        mediaRecorder.ondataavailable = (event) => { audioChunks.push(event.data); };
-        mediaRecorder.onstop = async () => {
-            const audioBlob = new Blob(audioChunks, { type: 'audio/mp3' });
-            const audioFile = new File([audioBlob], 'recording.mp3', { type: 'audio/mp3' });
-            selectedMediaFile = audioFile;
-            const audioUrl = URL.createObjectURL(audioBlob);
-            document.getElementById('mediaPreview').innerHTML = `<audio controls src="${audioUrl}"></audio>`;
-            document.getElementById('mediaPreview').style.display = 'block';
-            stream.getTracks().forEach(track => track.stop());
-        };
-        mediaRecorder.start();
-        btn.innerHTML = '<i class="fas fa-stop-circle text-red-500"></i>';
-    } catch (err) { showToast('لا يمكن الوصول إلى الميكروفون'); }
-};
-
-window.createPost = async function() {
-    const text = document.getElementById('postText')?.value || '';
-    if (!text.trim() && !selectedMediaFile) { showToast('اكتب شيئاً أو اختر وسائط'); return; }
-    document.getElementById('postStatus').innerHTML = '📤 جاري النشر...';
-    let mediaUrl = '', mediaType = 'none';
-    if (selectedMediaFile) {
-        try {
-            const result = await uploadMedia(selectedMediaFile);
-            mediaUrl = result.url;
-            mediaType = result.type;
-        } catch (error) { document.getElementById('postStatus').innerHTML = '❌ فشل رفع الوسائط'; return; }
-    }
-    try {
-        await push(ref(db, 'posts'), {
-            text, mediaUrl, mediaType,
-            sender: currentUser.uid,
-            senderName: currentUserData?.name,
-            likes: 0, likedBy: {}, retweets: {}, retweetedBy: {}, comments: {},
-            timestamp: Date.now()
-        });
-        document.getElementById('postStatus').innerHTML = '✅ تم النشر!';
-        setTimeout(() => closeCompose(), 1500);
-    } catch (error) { document.getElementById('postStatus').innerHTML = '❌ فشل النشر'; }
-};
-
-window.toggleLike = async function(postId, btn) {
-    if (!currentUser) return;
-    const postRef = ref(db, `posts/${postId}`);
-    const snap = await get(postRef);
-    const post = snap.val();
-    if (!post) return;
-    let likes = post.likes || 0;
-    let likedBy = post.likedBy || {};
-    if (likedBy[currentUser.uid]) { 
-        likes--; 
-        delete likedBy[currentUser.uid]; 
-        showToast('تم إلغاء الإعجاب');
-    } else { 
-        likes++; 
-        likedBy[currentUser.uid] = true; 
-        addNotification(post.sender, 'like', postId);
-        showToast('❤️ أعجبتك');
-        if (btn) {
-            const icon = btn.querySelector('i');
-            if (icon) icon.classList.add('heart-animation');
-            setTimeout(() => icon?.classList.remove('heart-animation'), 300);
-        }
-    }
-    await update(postRef, { likes, likedBy });
-    if (btn) {
-        btn.classList.toggle('active');
-        const span = btn.querySelector('span');
-        if (span) span.innerText = likes;
-    }
-};
-
-window.toggleRetweet = async function(postId, btn) {
-    if (!currentUser) return;
-    const postRef = ref(db, `posts/${postId}`);
-    const snap = await get(postRef);
-    const post = snap.val();
-    if (!post) return;
-    let retweets = post.retweets || {};
-    let retweetedBy = post.retweetedBy || {};
-    let retweetCount = Object.keys(retweets).length;
-    
-    if (retweetedBy[currentUser.uid]) {
-        const keyToDelete = Object.keys(retweets).find(k => retweets[k].userId === currentUser.uid);
-        if (keyToDelete) delete retweets[keyToDelete];
-        delete retweetedBy[currentUser.uid];
-        retweetCount--;
-        showToast('تم إلغاء إعادة التغريد');
-    } else {
-        const newRetweetId = Date.now().toString();
-        retweets[newRetweetId] = { userId: currentUser.uid, timestamp: Date.now() };
-        retweetedBy[currentUser.uid] = true;
-        retweetCount++;
-        addNotification(post.sender, 'retweet', postId);
-        showToast('🔄 تم إعادة التغريد');
-    }
-    await update(postRef, { retweets, retweetedBy });
-    if (btn) {
-        btn.classList.toggle('active');
-        const span = btn.querySelector('span');
-        if (span) span.innerText = retweetCount;
-    }
-};
-
-window.toggleBookmark = async function(postId, btn) {
-    if (!currentUser) return;
-    const userRef = ref(db, `users/${currentUser.uid}/bookmarks/${postId}`);
-    const snap = await get(userRef);
-    if (snap.exists()) {
-        await set(userRef, null);
-        delete bookmarks[postId];
-        showToast('تمت إزالة من الإشارات المرجعية');
-    } else {
-        await set(userRef, true);
-        bookmarks[postId] = true;
-        showToast('📌 تمت إضافة إلى الإشارات المرجعية');
-    }
-    if (btn) btn.classList.toggle('active');
-};
-
-window.openQuoteModal = function(postId) {
-    const quoteText = prompt('أضف تعليقك على هذا المنشور:');
-    if (quoteText) createQuotePost(postId, quoteText);
-};
-
-async function createQuotePost(originalPostId, quoteText) {
-    const originalPost = allPosts.find(p => p.id === originalPostId);
-    if (!originalPost) return;
-    try {
-        await push(ref(db, 'posts'), {
-            text: quoteText,
-            mediaUrl: '', mediaType: 'none',
-            sender: currentUser.uid,
-            senderName: currentUserData?.name,
-            quotePostId: originalPostId,
-            quotePostData: {
-                text: originalPost.text,
-                sender: originalPost.sender,
-                senderName: originalPost.senderName,
-                mediaUrl: originalPost.mediaUrl,
-                mediaType: originalPost.mediaType
-            },
-            likes: 0, likedBy: {}, retweets: {}, retweetedBy: {}, comments: {},
-            timestamp: Date.now()
-        });
-        addNotification(originalPost.sender, 'quote', originalPostId);
-        showToast('✅ تم نشر الاقتباس');
-    } catch (error) { showToast('❌ فشل النشر'); }
-}
-
-// ========== COMMENTS ==========
-window.openCommentsModal = async function(postId) {
-    currentPostForComments = postId;
-    const post = allPosts.find(p => p.id === postId);
-    if (!post) return;
-    const container = document.getElementById('commentsList');
-    const comments = post.comments || {};
-    if (!container) return;
-    container.innerHTML = '';
-    const sortedComments = Object.entries(comments).sort((a,b) => b[1].timestamp - a[1].timestamp);
-    for (const [commentKey, comment] of sortedComments) {
-        const user = allUsers[comment.userId] || { name: comment.username || 'مستخدم', avatarUrl: '' };
-        const replies = comment.replies || {};
-        const commentDiv = document.createElement('div');
-        commentDiv.className = 'comment-item';
-        commentDiv.innerHTML = `
-            <div class="comment-header">
-                <div class="comment-avatar" onclick="viewProfile('${comment.userId}')">${user.avatarUrl ? `<img src="${user.avatarUrl}">` : (user.name?.charAt(0) || '👤')}</div>
-                <div style="flex:1">
-                    <div><span class="comment-user" onclick="viewProfile('${comment.userId}')">${escapeHtml(user.name)}</span><span class="comment-time mx-2">· ${new Date(comment.timestamp).toLocaleString()}</span></div>
-                    <div class="comment-text">${escapeHtml(comment.text)}</div>
+    let html = '';
+    const commentsArray = Object.values(comments).sort((a, b) => b.timestamp - a.timestamp);
+    for (const comment of commentsArray) {
+        const userSnapshot = await db.ref(`users/${comment.userId}`).once('value');
+        const userData = userSnapshot.val();
+        const isVerified = userData?.verified || false;
+        html += `
+            <div style="display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid #EFF3F4;">
+                <div class="post-avatar" style="width: 40px; height: 40px;" onclick="openProfile('${comment.userId}')">
+                    ${comment.userAvatar ? `<img src="${comment.userAvatar}">` : '<i class="fa-solid fa-user text-white"></i>'}
+                </div>
+                <div style="flex: 1;">
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="post-name" onclick="openProfile('${comment.userId}')" style="cursor: pointer;">${escapeHtml(comment.userName)}</span>
+                        ${isVerified ? '<i class="fa-solid fa-circle-check verified-badge" style="font-size: 14px;"></i>' : ''}
+                        <span style="color: #536471; font-size: 12px;">${formatTime(comment.timestamp)}</span>
+                    </div>
+                    <div style="margin-top: 4px;">${escapeHtml(comment.text)}</div>
                 </div>
             </div>
-            <div class="reply-list" id="replies-${commentKey}"></div>
-            <div><button class="text-[#1d9bf0] text-sm mt-2" onclick="showReplyInput('${commentKey}')"><i class="fas fa-reply"></i> رد</button></div>
-            <div id="reply-input-${commentKey}" class="mt-2"></div>
         `;
-        const repliesContainer = commentDiv.querySelector(`#replies-${commentKey}`);
-        if (repliesContainer && replies) {
-            const sortedReplies = Object.entries(replies).sort((a,b) => a[1].timestamp - b[1].timestamp);
-            for (const [replyKey, reply] of sortedReplies) {
-                const replyUser = allUsers[reply.userId] || { name: reply.username || 'مستخدم', avatarUrl: '' };
-                repliesContainer.innerHTML += `
-                    <div class="reply-item">
-                        <div class="reply-header">
-                            <div class="reply-avatar" onclick="viewProfile('${reply.userId}')">${replyUser.avatarUrl ? `<img src="${replyUser.avatarUrl}">` : (replyUser.name?.charAt(0) || '👤')}</div>
-                            <div class="reply-user" onclick="viewProfile('${reply.userId}')">${escapeHtml(replyUser.name)}</div>
-                            <div class="comment-time">${new Date(reply.timestamp).toLocaleTimeString()}</div>
-                        </div>
-                        <div class="reply-text">${escapeHtml(reply.text)}</div>
-                    </div>
-                `;
+    }
+    container.innerHTML = html;
+}
+
+async function addComment() {
+    let text = document.getElementById('commentInput')?.value;
+    if (!text || !currentTweetId) return;
+    if (containsBadWords(text)) return showToast('⚠️ التعليق يحتوي على كلمات ممنوعة');
+    text = filterBadWords(text);
+    
+    const commentRef = db.ref(`comments/${currentTweetId}`).push();
+    await commentRef.set({
+        userId: currentUser.uid,
+        userName: currentUser.displayName || currentUser.name,
+        userAvatar: currentUser.avatar || "",
+        text: text,
+        timestamp: Date.now()
+    });
+    
+    const tweetRef = db.ref(`tweets/${currentTweetId}`);
+    const snapshot = await tweetRef.once('value');
+    const tweet = snapshot.val();
+    await tweetRef.update({ commentsCount: (tweet.commentsCount || 0) + 1 });
+    
+    if (tweet.userId !== currentUser.uid) {
+        await db.ref(`notifications/${tweet.userId}`).push({
+            type: 'comment',
+            userId: currentUser.uid,
+            userName: currentUser.displayName || currentUser.name,
+            tweetId: currentTweetId,
+            text: text.substring(0, 50),
+            timestamp: Date.now(),
+            read: false
+        });
+    }
+    
+    document.getElementById('commentInput').value = '';
+    await loadComments(currentTweetId);
+    refreshFeedCache();
+    showToast('💬 تم إضافة التعليق');
+}
+
+// ==================== Bad Words Management ====================
+async function loadBadWordsList() {
+    const snapshot = await db.ref('badWords').once('value');
+    const words = snapshot.val();
+    if (words) {
+        badWordsList = Object.values(words);
+    } else {
+        badWordsList = [];
+    }
+}
+
+async function addBadWord(word) {
+    if (!word.trim()) return;
+    const newWordRef = db.ref('badWords').push();
+    await newWordRef.set(word.trim().toLowerCase());
+    await loadBadWordsList();
+    showToast(`✅ تمت إضافة كلمة: ${word}`);
+    if (currentUser?.isAdmin) openAdminPanel();
+}
+
+async function removeBadWord(wordId, word) {
+    await db.ref(`badWords/${wordId}`).remove();
+    await loadBadWordsList();
+    showToast(`🗑️ تم حذف كلمة: ${word}`);
+    if (currentUser?.isAdmin) openAdminPanel();
+}
+
+function showAddBadWordModal() {
+    const word = prompt('📝 أدخل الكلمة التي تريد منعها:');
+    if (word && word.trim()) {
+        addBadWord(word.trim());
+    }
+}
+
+// ==================== Settings ====================
+function toggleTheme() {
+    document.body.classList.toggle('dark-mode');
+    const isDark = document.body.classList.contains('dark-mode');
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+    showToast(isDark ? '🌙 الوضع الليلي' : '☀️ الوضع النهاري');
+}
+
+// ==================== Logout ====================
+async function logout() {
+    try {
+        await auth.signOut();
+        localStorage.removeItem('auth_logged_in');
+        localStorage.removeItem('auth_user_email');
+        showToast('👋 تم تسجيل الخروج');
+        setTimeout(() => {
+            window.location.href = 'auth.html';
+        }, 1000);
+    } catch (error) {
+        showToast('❌ حدث خطأ');
+    }
+}
+
+// ==================== Profile ====================
+async function openMyProfile() {
+    if (currentUser) openProfile(currentUser.uid);
+}
+
+async function openProfile(userId) {
+    currentProfileUser = userId;
+    const snapshot = await db.ref(`users/${userId}`).once('value');
+    const userData = snapshot.val();
+    if (!userData) return;
+    
+    const tweetsSnapshot = await db.ref('tweets').once('value');
+    const tweets = tweetsSnapshot.val();
+    const userTweets = tweets ? Object.values(tweets).filter(t => t.userId === userId).length : 0;
+    
+    const followersSnapshot = await db.ref(`followers/${userId}`).once('value');
+    const followingSnapshot = await db.ref(`following/${userId}`).once('value');
+    const followersCount = followersSnapshot.exists() ? Object.keys(followersSnapshot.val()).length : 0;
+    const followingCount = followingSnapshot.exists() ? Object.keys(followingSnapshot.val()).length : 0;
+    
+    const isFollowing = await checkIfFollowing(userId);
+    const isOwner = userId === currentUser.uid;
+    
+    let adminButtons = '';
+    if (currentUser.isAdmin && !isOwner) {
+        adminButtons = `
+            <button class="follow-btn" onclick="verifyUser('${userId}')" style="background: #00BA7C;">✅ توثيق</button>
+            <button class="follow-btn" onclick="deleteUser('${userId}')" style="background: #F4212E;">🗑️ حذف</button>
+        `;
+    }
+    
+    const profileHtml = `
+        <div class="profile-header">
+            <div class="profile-avatar-large" onclick="${isOwner ? "document.getElementById('avatarInput').click()" : ""}" style="cursor: ${isOwner ? 'pointer' : 'default'};">
+                ${userData.avatar ? `<img src="${userData.avatar}">` : '<i class="fa-solid fa-user text-white text-4xl"></i>'}
+                ${isOwner ? '<div class="avatar-overlay"><i class="fa-solid fa-camera"></i></div>' : ''}
+            </div>
+            <div class="profile-name-large">
+                ${escapeHtml(userData.name)}
+                ${userData.verified ? '<i class="fa-solid fa-circle-check verified-badge" style="font-size: 20px;"></i>' : ''}
+            </div>
+            <div class="profile-bio">${escapeHtml(userData.bio || '')}</div>
+            ${userData.website ? `<div><a href="${userData.website}" target="_blank" class="profile-website">${userData.website}</a></div>` : ''}
+            <div class="profile-stats">
+                <div class="profile-stat" onclick="openUserTweets('${userId}')">
+                    <div class="profile-stat-number">${userTweets}</div>
+                    <div class="profile-stat-label">تغريدات</div>
+                </div>
+                <div class="profile-stat" onclick="openFollowersList('followers', '${userId}')">
+                    <div class="profile-stat-number">${followersCount}</div>
+                    <div class="profile-stat-label">متابع</div>
+                </div>
+                <div class="profile-stat" onclick="openFollowersList('following', '${userId}')">
+                    <div class="profile-stat-number">${followingCount}</div>
+                    <div class="profile-stat-label">يتابع</div>
+                </div>
+            </div>
+            <div class="profile-buttons">
+                ${!isOwner ? `<button class="follow-btn ${isFollowing ? 'following' : ''}" onclick="toggleFollow('${userId}')">${isFollowing ? 'متابَع' : 'متابعة'}</button>` : ''}
+                ${!isOwner ? `<button class="follow-btn" onclick="openChat('${userId}')">رسالة</button>` : ''}
+                ${isOwner ? `<button class="follow-btn" onclick="openEditProfileModal()">تعديل الملف</button>` : ''}
+                ${adminButtons}
+            </div>
+        </div>
+        <div class="profile-tabs">
+            <button class="active" onclick="loadUserTweets('${userId}', 'tweets')">التغريدات</button>
+            <button onclick="loadUserTweets('${userId}', 'media')">الوسائط</button>
+        </div>
+        <div id="profileTweetsContainer"></div>
+    `;
+    
+    document.getElementById('profileContent').innerHTML = profileHtml;
+    document.getElementById('profilePanel').classList.add('open');
+    
+    await loadUserTweets(userId, 'tweets');
+}
+
+function closeProfile() {
+    document.getElementById('profilePanel').classList.remove('open');
+}
+
+async function loadUserTweets(userId, type) {
+    const tweetsSnapshot = await db.ref('tweets').once('value');
+    const tweets = tweetsSnapshot.val();
+    if (!tweets) {
+        document.getElementById('profileTweetsContainer').innerHTML = '<div style="text-align: center; padding: 20px; color: #536471;">لا توجد تغريدات بعد</div>';
+        return;
+    }
+    
+    let userTweets = Object.values(tweets).filter(t => t.userId === userId).sort((a, b) => b.timestamp - a.timestamp);
+    
+    if (type === 'media') {
+        userTweets = userTweets.filter(t => t.mediaUrl);
+    }
+    
+    if (userTweets.length === 0) {
+        document.getElementById('profileTweetsContainer').innerHTML = '<div style="text-align: center; padding: 20px; color: #536471;">لا توجد تغريدات بعد</div>';
+        return;
+    }
+    
+    let html = '';
+    for (const tweet of userTweets.slice(0, 20)) {
+        html += await createTweetCard(tweet);
+    }
+    document.getElementById('profileTweetsContainer').innerHTML = html;
+}
+
+function openUserTweets(userId) {
+    if (currentProfileUser === userId) {
+        loadUserTweets(userId, 'tweets');
+    }
+}
+
+function openEditProfileModal() {
+    document.getElementById('editName').value = currentUser.displayName || currentUser.name || '';
+    document.getElementById('editBio').value = currentUser.bio || '';
+    document.getElementById('editWebsite').value = currentUser.website || '';
+    
+    const editAvatar = document.getElementById('editAvatar');
+    if (editAvatar && currentUser.avatar) {
+        editAvatar.innerHTML = `<img src="${currentUser.avatar}"><div class="avatar-overlay"><i class="fa-solid fa-camera"></i></div>`;
+    } else if (editAvatar) {
+        editAvatar.innerHTML = `<i class="fa-solid fa-user text-white text-3xl"></i><div class="avatar-overlay"><i class="fa-solid fa-camera"></i></div>`;
+    }
+    
+    document.getElementById('editProfileModal').classList.add('open');
+}
+
+function closeEditProfileModal() {
+    document.getElementById('editProfileModal').classList.remove('open');
+}
+
+async function saveProfileEdit() {
+    const newName = document.getElementById('editName')?.value;
+    const newBio = document.getElementById('editBio')?.value;
+    const newWebsite = document.getElementById('editWebsite')?.value;
+    
+    try {
+        showToast('🔄 جاري حفظ التغييرات...');
+        
+        if (newName && newName.trim() && newName.trim() !== currentUser.displayName) {
+            await currentUser.updateProfile({ displayName: newName.trim() });
+            currentUser.displayName = newName.trim();
+        }
+        
+        const updates = {};
+        if (newName && newName.trim()) updates.name = newName.trim();
+        if (newBio !== undefined) updates.bio = newBio || "";
+        if (newWebsite !== undefined) updates.website = newWebsite || "";
+        
+        await db.ref(`users/${currentUser.uid}`).update(updates);
+        
+        if (newName && newName.trim()) currentUser.name = newName.trim();
+        if (newBio !== undefined) currentUser.bio = newBio || "";
+        if (newWebsite !== undefined) currentUser.website = newWebsite || "";
+        
+        closeEditProfileModal();
+        
+        if (currentProfileUser === currentUser.uid) {
+            await openProfile(currentUser.uid);
+        }
+        
+        refreshFeedCache();
+        showToast('✅ تم حفظ التغييرات بنجاح');
+    } catch (error) {
+        console.error('Save profile error:', error);
+        showToast('❌ حدث خطأ أثناء حفظ التغييرات');
+    }
+}
+
+// ==================== Follow System ====================
+async function checkIfFollowing(userId) {
+    const snapshot = await db.ref(`followers/${userId}/${currentUser.uid}`).once('value');
+    return snapshot.exists();
+}
+
+async function toggleFollow(userId) {
+    const isFollowing = await checkIfFollowing(userId);
+    if (isFollowing) {
+        await db.ref(`followers/${userId}/${currentUser.uid}`).remove();
+        await db.ref(`following/${currentUser.uid}/${userId}`).remove();
+        showToast('❌ تم إلغاء المتابعة');
+    } else {
+        await db.ref(`followers/${userId}/${currentUser.uid}`).set({ uid: currentUser.uid, name: currentUser.displayName || currentUser.name, timestamp: Date.now() });
+        await db.ref(`following/${currentUser.uid}/${userId}`).set({ uid: userId, timestamp: Date.now() });
+        showToast('✅ تم المتابعة');
+        await db.ref(`notifications/${userId}`).push({
+            type: 'follow',
+            userId: currentUser.uid,
+            userName: currentUser.displayName || currentUser.name,
+            timestamp: Date.now(),
+            read: false
+        });
+    }
+    if (currentProfileUser === userId) openProfile(userId);
+    loadSuggestions();
+}
+
+// ==================== Suggestions ====================
+async function loadSuggestions() {
+    const usersSnapshot = await db.ref('users').once('value');
+    const users = usersSnapshot.val();
+    if (!users) return;
+    
+    const suggestions = [];
+    for (const [uid, user] of Object.entries(users)) {
+        if (uid !== currentUser.uid) {
+            const isFollowing = await checkIfFollowing(uid);
+            if (!isFollowing) {
+                suggestions.push({ uid, ...user });
             }
         }
-        container.appendChild(commentDiv);
     }
-    if (container.innerHTML === '') container.innerHTML = '<div class="text-center text-gray-500 py-10">لا توجد تعليقات بعد</div>';
-    document.getElementById('commentsPanel').classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-};
-
-window.closeComments = function() {
-    document.getElementById('commentsPanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
-
-window.showReplyInput = function(commentId) {
-    const replyDiv = document.getElementById(`reply-input-${commentId}`);
-    if (!replyDiv) return;
-    if (replyDiv.innerHTML) { replyDiv.innerHTML = ''; return; }
-    replyDiv.innerHTML = `<div class="flex gap-2 mt-2"><input type="text" id="reply-text-${commentId}" class="flex-1 bg-[#1a1a1a] border border-[#2f3336] rounded-full px-3 py-2 text-sm" placeholder="اكتب رداً..." onkeypress="if(event.key==='Enter') addReply('${commentId}')"><button onclick="addReply('${commentId}')" class="bg-[#1d9bf0] text-white px-4 py-2 rounded-full text-sm">نشر</button></div>`;
-};
-
-window.addReply = async function(commentId) {
-    const input = document.getElementById(`reply-text-${commentId}`);
-    const text = input?.value;
-    if (!text?.trim()) return;
-    const postRef = ref(db, `posts/${currentPostForComments}/comments/${commentId}/replies`);
-    await push(postRef, { userId: currentUser.uid, username: currentUserData?.name, text, timestamp: Date.now() });
-    if (input) input.value = '';
-    openCommentsModal(currentPostForComments);
-};
-
-window.addComment = async function() {
-    const input = document.getElementById('commentInput');
-    const text = input?.value;
-    if (!text?.trim() || !currentPostForComments) return;
-    await push(ref(db, `posts/${currentPostForComments}/comments`), {
-        userId: currentUser.uid, username: currentUserData?.name, text, replies: {}, timestamp: Date.now()
-    });
-    if (input) input.value = '';
-    openCommentsModal(currentPostForComments);
-    const post = allPosts.find(p => p.id === currentPostForComments);
-    if (post) addNotification(post.sender, 'comment', currentPostForComments);
-};
-
-// ========== NOTIFICATIONS ==========
-async function addNotification(targetUserId, type, postId = null) {
-    if (targetUserId === currentUser.uid) return;
-    const messages = { 
-        like: '❤️ أعجب بمنشورك', 
-        comment: '💬 علق على منشورك', 
-        retweet: '🔄 أعاد تغريد منشورك',
-        quote: '📝 اقتبس منشورك',
-        follow: '👥 بدأ بمتابعتك'
-    };
-    await push(ref(db, `notifications/${targetUserId}`), {
-        type, fromUserId: currentUser.uid, fromUsername: currentUserData?.name,
-        message: messages[type], postId: postId, timestamp: Date.now(), read: false
-    });
-    updateNotificationBadge();
-}
-
-function updateNotificationBadge() {
-    if (!currentUser?.uid) return;
-    onValue(ref(db, `notifications/${currentUser.uid}`), (snap) => {
-        const notifs = snap.val() || {};
-        const unread = Object.values(notifs).filter(n => !n.read).length;
-        const icon = document.getElementById('notifIcon');
-        if (icon) {
-            if (unread > 0) icon.innerHTML = `<i class="fas fa-bell"></i><span class="notification-badge">${unread > 9 ? '9+' : unread}</span>`;
-            else icon.innerHTML = '<i class="far fa-bell"></i>';
-        }
-    });
-}
-
-window.openNotifications = async function() {
-    const panel = document.getElementById('notificationsPanel');
-    if (!panel) return;
-    const snap = await get(child(ref(db), `notifications/${currentUser.uid}`));
-    const notifs = snap.val() || {};
-    const container = document.getElementById('notificationsList');
-    if (!container) return;
-    container.innerHTML = '';
-    const sorted = Object.entries(notifs).sort((a,b) => b[1].timestamp - a[1].timestamp);
-    for (const [key, n] of sorted) {
-        const icons = { like: '❤️', comment: '💬', retweet: '🔄', quote: '📝', follow: '👥' };
-        const bgColor = n.read ? '' : 'bg-[#1d9bf0]/10 border-r-4 border-[#1d9bf0]';
-        container.innerHTML += `
-            <div class="notification-item ${bgColor}" onclick="handleNotificationClick('${n.type}', '${n.fromUserId}', '${n.postId || ''}')">
-                <div class="text-2xl">${icons[n.type] || '🔔'}</div>
-                <div class="flex-1">
-                    <div class="font-bold">${escapeHtml(n.fromUsername)}</div>
-                    <div class="text-sm text-gray-500">${n.message}</div>
-                    <div class="text-xs text-gray-500 mt-1">${new Date(n.timestamp).toLocaleString()}</div>
+    
+    const topSuggestions = suggestions.slice(0, 3);
+    const container = document.getElementById('suggestionsList');
+    if (container && topSuggestions.length > 0) {
+        container.innerHTML = topSuggestions.map(user => `
+            <div class="follow-item" onclick="openProfile('${user.uid}')">
+                <div class="follow-info">
+                    <div class="follow-avatar">
+                        ${user.avatar ? `<img src="${user.avatar}">` : '<i class="fa-solid fa-user text-white"></i>'}
+                    </div>
+                    <div>
+                        <div class="follow-name">${escapeHtml(user.name)}</div>
+                        <div class="follow-username">@${escapeHtml(user.name)}</div>
+                    </div>
                 </div>
-            </div>
-        `;
-        if (!n.read) await update(ref(db, `notifications/${currentUser.uid}/${key}`), { read: true });
-    }
-    if (container.innerHTML === '') container.innerHTML = '<div class="text-center text-gray-500 py-10">لا توجد إشعارات</div>';
-    panel.classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-    updateNotificationBadge();
-};
-
-window.handleNotificationClick = function(type, userId, postId) {
-    closeNotifications();
-    if (type === 'follow') viewProfile(userId);
-    else if (postId) openCommentsModal(postId);
-};
-
-window.closeNotifications = function() {
-    document.getElementById('notificationsPanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
-
-function showToast(message) {
-    let toast = document.getElementById('customToast');
-    if (!toast) {
-        toast = document.createElement('div');
-        toast.id = 'customToast';
-        document.body.appendChild(toast);
-    }
-    toast.innerText = message;
-    toast.style.opacity = '1';
-    setTimeout(() => { toast.style.opacity = '0'; }, 3000);
-}
-
-// ========== PROFILE ==========
-window.openMyProfile = function() { viewProfile(currentUser.uid); };
-
-window.viewProfile = async function(userId) {
-    if (!userId) return;
-    viewingProfileUserId = userId;
-    await loadProfileData(userId);
-    document.getElementById('profilePanel').classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-};
-
-window.closeProfile = function() {
-    document.getElementById('profilePanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
-
-async function loadProfileData(userId) {
-    const userSnap = await get(child(ref(db), `users/${userId}`));
-    const user = userSnap.val();
-    if (!user) return;
-    
-    const coverEl = document.getElementById('profileCover');
-    if (coverEl) {
-        if (user.coverUrl) coverEl.style.background = `url(${user.coverUrl}) center/cover`;
-        else coverEl.style.background = 'linear-gradient(135deg, #1d9bf0, #f91880)';
-    }
-    
-    const avatarEl = document.getElementById('profileAvatar');
-    if (avatarEl) {
-        avatarEl.innerHTML = user.avatarUrl ? `<img src="${user.avatarUrl}">` : (user.name?.charAt(0) || '👤');
-    }
-    
-    document.getElementById('profileName').innerText = user.name;
-    document.getElementById('profileBio').innerText = user.bio || '✏️ أضف سيرة ذاتية';
-    
-    const userPosts = allPosts.filter(p => p.sender === userId);
-    document.getElementById('profilePostsCount').innerText = userPosts.length;
-    document.getElementById('profileFollowersCount').innerText = Object.keys(user.followers || {}).length;
-    document.getElementById('profileFollowingCount').innerText = Object.keys(user.following || {}).length;
-    
-    const grid = document.getElementById('profilePostsGrid');
-    if (grid) {
-        grid.innerHTML = userPosts.map(post => `
-            <div class="profile-post" onclick="openCommentsModal('${post.id}')">
-                ${post.mediaUrl ? (post.mediaType === 'image' ? `<img src="${post.mediaUrl}" loading="lazy">` : post.mediaType === 'video' ? `<video src="${post.mediaUrl}"></video>` : `<i class="fas fa-music text-2xl"></i>`) : `<i class="fas fa-file-alt text-2xl"></i>`}
+                <button class="follow-btn" onclick="event.stopPropagation(); toggleFollow('${user.uid}')">متابعة</button>
             </div>
         `).join('');
-        if (userPosts.length === 0) grid.innerHTML = '<div class="col-span-3 text-center text-gray-500 py-10">لا توجد منشورات</div>';
     }
-    
-    const buttonsDiv = document.getElementById('profileButtons');
-    if (buttonsDiv) {
-        buttonsDiv.innerHTML = '';
-        if (userId === currentUser.uid) {
-            buttonsDiv.innerHTML = `
-                <button class="profile-btn profile-btn-primary" onclick="openEditProfileModal()">✏️ تعديل الملف</button>
-                <button class="profile-btn profile-btn-secondary" onclick="logout()">🚪 تسجيل خروج</button>
-                ${isAdmin ? '<button class="profile-btn profile-btn-secondary" onclick="openAdmin()">🔧 لوحة التحكم</button>' : ''}
-            `;
-        } else {
-            const isFollowing = currentUserData?.following && currentUserData.following[userId];
-            buttonsDiv.innerHTML = `
-                <button class="profile-btn profile-btn-primary" onclick="toggleFollow('${userId}', this)">${isFollowing ? '✅ متابع' : '➕ متابعة'}</button>
-                <button class="profile-btn profile-btn-secondary" onclick="openPrivateChat('${userId}')"><i class="fas fa-envelope"></i> مراسلة</button>
-            `;
-        }
-    }
-    
-    setupProfileTabs(userPosts);
 }
 
-function setupProfileTabs(userPosts) {
-    const tabs = document.querySelectorAll('.profile-tab');
-    const grid = document.getElementById('profilePostsGrid');
-    if (!tabs.length || !grid) return;
-    tabs.forEach(tab => {
-        tab.onclick = () => {
-            tabs.forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-            const filter = tab.dataset.tab;
-            let filtered = [...userPosts];
-            if (filter === 'media') filtered = userPosts.filter(p => p.mediaUrl && p.mediaType !== 'none');
-            grid.innerHTML = filtered.map(post => `
-                <div class="profile-post" onclick="openCommentsModal('${post.id}')">
-                    ${post.mediaUrl ? (post.mediaType === 'image' ? `<img src="${post.mediaUrl}" loading="lazy">` : post.mediaType === 'video' ? `<video src="${post.mediaUrl}"></video>` : `<i class="fas fa-music text-2xl"></i>`) : `<i class="fas fa-file-alt text-2xl"></i>`}
+// ==================== Followers/Following List ====================
+async function openFollowersList(type, userId) {
+    const targetUserId = userId || currentProfileUser;
+    const refPath = type === 'followers' ? `followers/${targetUserId}` : `following/${targetUserId}`;
+    const snapshot = await db.ref(refPath).once('value');
+    const data = snapshot.val();
+    if (!data) {
+        showToast(`لا يوجد ${type === 'followers' ? 'متابعون' : 'متابَعون'}`);
+        return;
+    }
+    
+    let html = `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                    <h3 style="font-weight: 700;">${type === 'followers' ? 'المتابعون' : 'المتابَعون'}</h3>
+                    <button onclick="this.closest('.modal-overlay').remove()" style="background: none; border: none; font-size: 24px;">&times;</button>
+                </div>`;
+    
+    for (const [uid] of Object.entries(data)) {
+        const userSnapshot = await db.ref(`users/${uid}`).once('value');
+        const user = userSnapshot.val();
+        if (user) {
+            html += `
+                <div class="follow-item" onclick="openProfile('${uid}'); this.closest('.modal-overlay').remove();">
+                    <div class="follow-info">
+                        <div class="follow-avatar">
+                            ${user.avatar ? `<img src="${user.avatar}">` : '<i class="fa-solid fa-user text-white"></i>'}
+                        </div>
+                        <div>
+                            <div class="follow-name">${escapeHtml(user.name)}</div>
+                            <div class="follow-username">@${escapeHtml(user.name)}</div>
+                        </div>
+                    </div>
                 </div>
-            `).join('');
-            if (filtered.length === 0) grid.innerHTML = '<div class="col-span-3 text-center text-gray-500 py-10">لا توجد منشورات</div>';
-        };
-    });
+            `;
+        }
+    }
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay open';
+    modal.innerHTML = `<div class="modal-content" style="max-width: 400px;">${html}</div>`;
+    document.body.appendChild(modal);
 }
 
-// ========== EDIT PROFILE MODAL ==========
-window.openEditProfileModal = function() {
-    document.getElementById('editName').value = currentUserData?.name || '';
-    document.getElementById('editBio').value = currentUserData?.bio || '';
-    document.getElementById('editProfileModal').classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-};
+// ==================== Trending Hashtags ====================
+async function loadTrendingHashtags() {
+    const hashtagSnapshot = await db.ref('hashtags').once('value');
+    const hashtags = hashtagSnapshot.val();
+    if (!hashtags) return;
+    
+    const trending = [];
+    for (const [tag, posts] of Object.entries(hashtags)) {
+        trending.push({ tag, count: Object.keys(posts).length });
+    }
+    trending.sort((a, b) => b.count - a.count);
+    const top5 = trending.slice(0, 5);
+    
+    const container = document.getElementById('trendingList');
+    if (container) {
+        container.innerHTML = top5.map(item => `
+            <div class="trending-item" onclick="searchHashtag('${item.tag}')">
+                <div class="trending-category">الاتجاهات</div>
+                <div class="trending-hashtag">#${escapeHtml(item.tag)}</div>
+                <div class="trending-count">${item.count} تغريدة</div>
+            </div>
+        `).join('');
+    }
+}
 
-window.closeEditProfileModal = function() {
-    document.getElementById('editProfileModal').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
+// ==================== Search ====================
+async function searchHashtag(tag) {
+    openSearch();
+    document.getElementById('modalSearchInput').value = `#${tag}`;
+    await modalSearch();
+}
 
-window.saveProfileEdit = async function() {
-    const newName = document.getElementById('editName').value;
-    const newBio = document.getElementById('editBio').value;
-    if (!newName.trim()) {
-        showToast('الاسم مطلوب');
+function openSearch() {
+    document.getElementById('searchPanel').classList.add('open');
+}
+
+function closeSearch() {
+    document.getElementById('searchPanel').classList.remove('open');
+    document.getElementById('modalSearchInput').value = '';
+    document.getElementById('modalSearchResults').innerHTML = '';
+}
+
+async function searchAll() {
+    const query = document.getElementById('searchInput')?.value.toLowerCase();
+    if (!query) return;
+    await performSearch(query);
+}
+
+async function modalSearch() {
+    const query = document.getElementById('modalSearchInput')?.value.toLowerCase();
+    if (!query) {
+        document.getElementById('modalSearchResults').innerHTML = '';
         return;
     }
-    await update(ref(db, `users/${currentUser.uid}`), { name: newName.trim(), bio: newBio });
-    showToast('✅ تم تحديث الملف الشخصي');
-    closeEditProfileModal();
-    setTimeout(() => location.reload(), 1000);
-};
+    await performSearch(query);
+}
 
-// ========== UPLOAD AVATAR/COVER ==========
-window.changeAvatar = function() { document.getElementById('avatarInput')?.click(); };
-window.changeCover = function() { document.getElementById('coverInput')?.click(); };
+async function performSearch(query) {
+    const usersSnapshot = await db.ref('users').once('value');
+    const users = usersSnapshot.val();
+    const hashtagSnapshot = await db.ref('hashtags').once('value');
+    const hashtags = hashtagSnapshot.val();
+    
+    let results = [];
+    if (users) {
+        results.push(...Object.values(users).filter(u => u.name?.toLowerCase().includes(query) || u.email?.toLowerCase().includes(query)).map(u => ({ type: 'user', data: u })));
+    }
+    if (hashtags && query.startsWith('#')) {
+        const tag = query.substring(1);
+        if (hashtags[tag]) results.push({ type: 'hashtag', data: { tag: tag, count: Object.keys(hashtags[tag]).length } });
+    }
+    
+    let html = '';
+    for (const result of results) {
+        if (result.type === 'user') {
+            html += `
+                <div class="follow-item" onclick="closeSearch(); openProfile('${result.data.uid}')">
+                    <div class="follow-info">
+                        <div class="follow-avatar">
+                            ${result.data.avatar ? `<img src="${result.data.avatar}">` : '<i class="fa-solid fa-user text-white"></i>'}
+                        </div>
+                        <div>
+                            <div class="follow-name">${escapeHtml(result.data.name)}</div>
+                            <div class="follow-username">@${escapeHtml(result.data.name)}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else if (result.type === 'hashtag') {
+            html += `
+                <div class="trending-item" onclick="closeSearch(); searchHashtag('${result.data.tag}')">
+                    <div class="trending-category">الهاشتاغ</div>
+                    <div class="trending-hashtag">#${escapeHtml(result.data.tag)}</div>
+                    <div class="trending-count">${result.data.count} تغريدة</div>
+                </div>
+            `;
+        }
+    }
+    
+    const container = document.getElementById('modalSearchResults');
+    if (container) container.innerHTML = html || '<div style="text-align: center; padding: 20px; color: #536471;">لا توجد نتائج</div>';
+}
 
-if (!document.getElementById('avatarInput')) {
-    const avatarInput = document.createElement('input');
-    avatarInput.type = 'file';
-    avatarInput.accept = 'image/*';
-    avatarInput.id = 'avatarInput';
-    avatarInput.style.display = 'none';
-    document.body.appendChild(avatarInput);
-    avatarInput.addEventListener('change', async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        showToast('📤 جاري رفع الصورة...');
-        const result = await uploadMedia(file);
-        await update(ref(db, `users/${currentUser.uid}`), { avatarUrl: result.url });
-        showToast('✅ تم تحديث الصورة الشخصية');
-        location.reload();
+// ==================== Notifications ====================
+async function loadNotifications() {
+    if (!currentUser) return;
+    db.ref(`notifications/${currentUser.uid}`).on('value', (snapshot) => {
+        const notifications = snapshot.val();
+        const notifIcon = document.querySelector('.sidebar-item:nth-child(3) i');
+        if (notifIcon && notifications) {
+            const unread = Object.values(notifications).filter(n => !n.read).length;
+            if (unread > 0) {
+                notifIcon.style.color = '#1D9BF0';
+            } else {
+                notifIcon.style.color = '';
+            }
+        }
     });
 }
 
-if (!document.getElementById('coverInput')) {
-    const coverInput = document.createElement('input');
-    coverInput.type = 'file';
-    coverInput.accept = 'image/*';
-    coverInput.id = 'coverInput';
-    coverInput.style.display = 'none';
-    document.body.appendChild(coverInput);
-    coverInput.addEventListener('change', async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        showToast('📤 جاري رفع الصورة...');
-        const result = await uploadMedia(file);
-        await update(ref(db, `users/${currentUser.uid}`), { coverUrl: result.url });
-        showToast('✅ تم تحديث صورة الغلاف');
-        location.reload();
-    });
-}
-
-// ========== FOLLOW ==========
-window.toggleFollow = async function(userId, btn) {
-    if (!currentUser || currentUser.uid === userId) return;
-    const userRef = ref(db, `users/${currentUser.uid}/following/${userId}`);
-    const targetRef = ref(db, `users/${userId}/followers/${currentUser.uid}`);
-    const snap = await get(userRef);
-    if (snap.exists()) {
-        await set(userRef, null); 
-        await set(targetRef, null);
-        if (btn) btn.innerText = '➕ متابعة';
-        showToast(`👋 توقفت عن متابعة ${allUsers[userId]?.name}`);
+async function openNotifications() {
+    const snapshot = await db.ref(`notifications/${currentUser.uid}`).once('value');
+    const notifications = snapshot.val();
+    const container = document.getElementById('notificationsList');
+    
+    if (!notifications) {
+        container.innerHTML = '<div style="text-align: center; padding: 20px; color: #536471;">لا توجد إشعارات</div>';
     } else {
-        await set(userRef, true); 
-        await set(targetRef, true);
-        if (btn) btn.innerText = '✅ متابع';
-        addNotification(userId, 'follow');
-        showToast(`👥 بدأت بمتابعة ${allUsers[userId]?.name}`);
-    }
-    if (viewingProfileUserId === userId) await loadProfileData(userId);
-};
-
-window.openFollowersList = async function(type) {
-    document.getElementById('followersTitle').innerText = type === 'followers' ? 'المتابعون' : 'المتابَعون';
-    const panel = document.getElementById('followersPanel');
-    const container = document.getElementById('followersList');
-    const user = viewingProfileUserId ? allUsers[viewingProfileUserId] : currentUserData;
-    const list = type === 'followers' ? user?.followers : user?.following;
-    if (!container) return;
-    container.innerHTML = '';
-    if (list) {
-        for (const [uid] of Object.entries(list)) {
-            const u = allUsers[uid];
-            if (u) {
-                container.innerHTML += `<div class="follower-item" onclick="viewProfile('${uid}')"><div class="w-12 h-12 rounded-full bg-[#1d9bf0] overflow-hidden flex items-center justify-center">${u.avatarUrl ? `<img src="${u.avatarUrl}">` : (u.name?.charAt(0) || 'U')}</div><div><div class="font-bold">${escapeHtml(u.name)}</div><div class="text-sm text-gray-500">@${u.name?.toLowerCase().replace(/\s/g, '')}</div></div></div>`;
-            }
+        let html = '';
+        const sorted = Object.entries(notifications).sort((a, b) => b[1].timestamp - a[1].timestamp);
+        for (const [id, notif] of sorted) {
+            let actionText = '';
+            if (notif.type === 'like') actionText = 'أعجب بتغريدتك';
+            else if (notif.type === 'retweet') actionText = 'أعاد تغريد تغريدتك';
+            else if (notif.type === 'comment') actionText = `علق على تغريدتك: "${notif.text}"`;
+            else if (notif.type === 'follow') actionText = 'بدأ بمتابعتك';
+            
+            html += `
+                <div class="follow-item" onclick="markNotificationRead('${id}'); ${notif.type === 'follow' ? `openProfile('${notif.userId}')` : `openComments('${notif.tweetId}')`}; closeNotifications();">
+                    <div class="follow-info">
+                        <div class="follow-avatar">
+                            <i class="fa-solid ${notif.type === 'like' ? 'fa-heart' : notif.type === 'retweet' ? 'fa-retweet' : notif.type === 'comment' ? 'fa-comment' : 'fa-user-plus'}" style="color: #1D9BF0;"></i>
+                        </div>
+                        <div>
+                            <div class="follow-name">${escapeHtml(notif.userName)}</div>
+                            <div style="font-size: 13px;">${actionText}</div>
+                            <div style="font-size: 11px; color: #536471;">${formatTime(notif.timestamp)}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
         }
+        container.innerHTML = html;
     }
-    if (container.innerHTML === '') container.innerHTML = '<div class="text-center text-gray-500 py-10">لا يوجد مستخدمين</div>';
-    panel.classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-};
-
-window.closeFollowers = function() {
-    document.getElementById('followersPanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
-
-// ========== CHAT ==========
-function getChatId(uid1, uid2) { return uid1 < uid2 ? `${uid1}_${uid2}` : `${uid2}_${uid1}`; }
-
-window.openConversations = async function() {
-    const panel = document.getElementById('conversationsPanel');
-    const container = document.getElementById('conversationsList');
-    if (!panel || !container) return;
-    const convSnap = await get(child(ref(db), `private_chats/${currentUser.uid}`));
-    const conversations = convSnap.val() || {};
-    container.innerHTML = '';
-    for (const [otherId, convData] of Object.entries(conversations)) {
-        const otherUser = allUsers[otherId];
-        if (otherUser) {
-            container.innerHTML += `<div class="conversation-item" onclick="openPrivateChat('${otherId}')"><div class="w-12 h-12 rounded-full bg-[#1d9bf0] overflow-hidden flex items-center justify-center">${otherUser.avatarUrl ? `<img src="${otherUser.avatarUrl}">` : (otherUser.name?.charAt(0) || 'U')}</div><div><div class="font-bold">${escapeHtml(otherUser.name)}</div><div class="text-sm text-gray-500">${convData.lastMessage?.substring(0, 40) || 'رسالة'}</div></div></div>`;
-        }
+    
+    document.getElementById('notificationsPanel').classList.add('open');
+    
+    const updates = {};
+    for (const id of Object.keys(notifications)) {
+        updates[`notifications/${currentUser.uid}/${id}/read`] = true;
     }
-    if (container.innerHTML === '') container.innerHTML = '<div class="text-center text-gray-500 py-10">لا توجد محادثات بعد</div>';
-    panel.classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-};
-
-window.closeConversations = function() {
-    document.getElementById('conversationsPanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
-
-window.openPrivateChat = async function(otherUserId) {
-    currentChatUserId = otherUserId;
-    const user = allUsers[otherUserId];
-    document.getElementById('chatUserName').innerText = user?.name || 'مستخدم';
-    document.getElementById('chatAvatar').innerHTML = user?.avatarUrl ? `<img src="${user.avatarUrl}">` : (user?.name?.charAt(0) || 'U');
-    await loadPrivateMessages(otherUserId);
-    document.getElementById('chatPanel').classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-    closeConversations();
-};
-
-window.closeChat = function() {
-    document.getElementById('chatPanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-    currentChatUserId = null;
-};
-
-async function loadPrivateMessages(otherUserId) {
-    const container = document.getElementById('chatMessages');
-    if (!container) return;
-    container.innerHTML = '<div class="text-center text-gray-500 py-10">جاري التحميل...</div>';
-    const chatId = getChatId(currentUser.uid, otherUserId);
-    const messagesSnap = await get(child(ref(db), `private_messages/${chatId}`));
-    const messages = messagesSnap.val() || {};
-    container.innerHTML = '';
-    const sorted = Object.entries(messages).sort((a,b)=>a[1].timestamp-b[1].timestamp);
-    for (const [id, msg] of sorted) {
-        const isSent = msg.senderId === currentUser.uid;
-        const time = new Date(msg.timestamp).toLocaleTimeString();
-        let content = '';
-        if (msg.type === 'text') content = `<div class="message-bubble ${isSent ? 'sent' : 'received'}">${escapeHtml(msg.text)}</div>`;
-        else if (msg.type === 'image') content = `<img src="${msg.imageUrl}" class="message-image max-w-[180px] rounded-2xl cursor-pointer" onclick="window.open('${msg.imageUrl}')">`;
-        else if (msg.type === 'audio') content = `<div class="message-audio"><audio controls src="${msg.audioUrl}"></audio></div>`;
-        container.innerHTML += `<div class="chat-message ${isSent ? 'sent' : 'received'}"><div>${content}<div class="text-[10px] opacity-50 mt-1">${time}</div></div></div>`;
-    }
-    if (container.innerHTML === '') container.innerHTML = '<div class="text-center text-gray-500 py-10">لا توجد رسائل بعد</div>';
-    container.scrollTop = container.scrollHeight;
+    await db.ref().update(updates);
 }
 
-window.sendChatMessage = async function() {
-    const input = document.getElementById('chatMessageInput');
-    const text = input?.value.trim();
-    if (!text || !currentChatUserId) return;
-    const chatId = getChatId(currentUser.uid, currentChatUserId);
-    await push(ref(db, `private_messages/${chatId}`), { senderId: currentUser.uid, senderName: currentUserData?.name, text, type: 'text', timestamp: Date.now() });
-    await set(ref(db, `private_chats/${currentUser.uid}/${currentChatUserId}`), { lastMessage: text, lastTimestamp: Date.now(), withUser: currentChatUserId });
-    await set(ref(db, `private_chats/${currentChatUserId}/${currentUser.uid}`), { lastMessage: text, lastTimestamp: Date.now(), withUser: currentUser.uid });
-    if (input) input.value = '';
-    await loadPrivateMessages(currentChatUserId);
-};
+function closeNotifications() {
+    document.getElementById('notificationsPanel').classList.remove('open');
+}
 
-window.sendChatImage = async function(input) {
-    const file = input.files[0];
-    if (!file || !currentChatUserId) return;
-    const result = await uploadMedia(file);
-    const chatId = getChatId(currentUser.uid, currentChatUserId);
-    await push(ref(db, `private_messages/${chatId}`), { senderId: currentUser.uid, senderName: currentUserData?.name, imageUrl: result.url, type: 'image', timestamp: Date.now() });
-    await set(ref(db, `private_chats/${currentUser.uid}/${currentChatUserId}`), { lastMessage: '📷 صورة', lastTimestamp: Date.now(), withUser: currentChatUserId });
-    await set(ref(db, `private_chats/${currentChatUserId}/${currentUser.uid}`), { lastMessage: '📷 صورة', lastTimestamp: Date.now(), withUser: currentUser.uid });
+async function markNotificationRead(notifId) {
+    await db.ref(`notifications/${currentUser.uid}/${notifId}`).update({ read: true });
+}
+
+// ==================== Conversations ====================
+async function openConversations() {
+    const snapshot = await db.ref('chats').once('value');
+    const chats = snapshot.val();
+    const container = document.getElementById('conversationsList');
+    
+    if (!chats) {
+        container.innerHTML = '<div style="text-align: center; padding: 20px; color: #536471;">لا توجد محادثات</div>';
+    } else {
+        const conversations = [];
+        for (const [chatId, messages] of Object.entries(chats)) {
+            const [user1, user2] = chatId.split('_');
+            const otherUserId = user1 === currentUser.uid ? user2 : user1;
+            const userSnapshot = await db.ref(`users/${otherUserId}`).once('value');
+            const userData = userSnapshot.val();
+            const messagesArray = Object.values(messages);
+            const lastMessage = messagesArray.sort((a, b) => b.timestamp - a.timestamp)[0];
+            conversations.push({ userId: otherUserId, userData, lastMessage, timestamp: lastMessage.timestamp });
+        }
+        conversations.sort((a, b) => b.timestamp - a.timestamp);
+        
+        let html = '';
+        for (const conv of conversations) {
+            html += `
+                <div class="follow-item" onclick="closeConversations(); openChat('${conv.userId}')">
+                    <div class="follow-info">
+                        <div class="follow-avatar">
+                            ${conv.userData?.avatar ? `<img src="${conv.userData.avatar}">` : '<i class="fa-solid fa-user text-white"></i>'}
+                        </div>
+                        <div>
+                            <div class="follow-name">${escapeHtml(conv.userData?.name || 'مستخدم')}</div>
+                            <div style="font-size: 12px; color: #536471;">${conv.lastMessage.text ? conv.lastMessage.text.substring(0, 30) : (conv.lastMessage.imageUrl ? 'صورة' : '')}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        container.innerHTML = html;
+    }
+    document.getElementById('conversationsPanel').classList.add('open');
+}
+
+function closeConversations() {
+    document.getElementById('conversationsPanel').classList.remove('open');
+}
+
+// ==================== Chat ====================
+async function openChat(userId) {
+    const snapshot = await db.ref(`users/${userId}`).once('value');
+    currentChatUser = snapshot.val();
+    document.getElementById('chatUserName').innerHTML = escapeHtml(currentChatUser.name);
+    await loadChatMessages(userId);
+    document.getElementById('chatPanel').classList.add('open');
+}
+
+function closeChat() {
+    document.getElementById('chatPanel').classList.remove('open');
+    if (currentChatUser) {
+        const chatId = getChatId(currentUser.uid, currentChatUser.uid);
+        db.ref(`chats/${chatId}`).off();
+    }
+    currentChatUser = null;
+}
+
+function getChatId(user1, user2) {
+    return [user1, user2].sort().join('_');
+}
+
+async function loadChatMessages(userId) {
+    const chatId = getChatId(currentUser.uid, userId);
+    db.ref(`chats/${chatId}`).off();
+    db.ref(`chats/${chatId}`).on('value', (snapshot) => {
+        const messages = snapshot.val();
+        const container = document.getElementById('chatMessages');
+        if (!container) return;
+        if (!messages) {
+            container.innerHTML = '<div style="text-align: center; padding: 20px; color: #536471;">لا توجد رسائل بعد</div>';
+            return;
+        }
+        let html = '';
+        const messagesArray = Object.values(messages).sort((a, b) => a.timestamp - b.timestamp);
+        for (const msg of messagesArray) {
+            const isSent = msg.senderId === currentUser.uid;
+            html += `
+                <div style="display: flex; justify-content: ${isSent ? 'flex-end' : 'flex-start'}; margin-bottom: 12px;">
+                    <div style="background: ${isSent ? '#1D9BF0' : '#EFF3F4'}; color: ${isSent ? 'white' : '#0F1419'}; padding: 10px 14px; border-radius: 20px; max-width: 70%;">
+                        ${msg.text ? escapeHtml(msg.text) : ''}
+                        ${msg.imageUrl ? `<img src="${msg.imageUrl}" style="max-width: 200px; border-radius: 12px; margin-top: 8px; cursor: pointer;" onclick="openMediaViewer('${msg.imageUrl}', 'image')">` : ''}
+                        ${msg.audioUrl ? `<audio controls src="${msg.audioUrl}" style="max-width: 200px;"></audio>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        container.innerHTML = html;
+        container.scrollTop = container.scrollHeight;
+    });
+}
+
+async function sendChatMessage() {
+    const input = document.getElementById('chatInput');
+    let text = input?.value;
+    if (!text || !currentChatUser) return;
+    if (containsBadWords(text)) return showToast('⚠️ الرسالة تحتوي على كلمات ممنوعة');
+    text = filterBadWords(text);
+    const chatId = getChatId(currentUser.uid, currentChatUser.uid);
+    await db.ref(`chats/${chatId}`).push({ senderId: currentUser.uid, text: text, timestamp: Date.now(), read: false });
     input.value = '';
-    await loadPrivateMessages(currentChatUserId);
-};
+    loadChatMessages(currentChatUser.uid);
+}
 
-window.startRecordingChat = async function() {
-    const btn = document.getElementById('chatRecordBtn');
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-        if (btn) btn.innerHTML = '<i class="fas fa-microphone"></i>';
+async function sendChatImage(input) {
+    const file = input.files[0];
+    if (file && currentChatUser) {
+        showToast('🔄 جاري رفع الصورة...');
+        const url = await uploadToCloudinary(file);
+        if (url) {
+            const chatId = getChatId(currentUser.uid, currentChatUser.uid);
+            await db.ref(`chats/${chatId}`).push({ senderId: currentUser.uid, imageUrl: url, timestamp: Date.now(), read: false });
+            showToast('✅ تم إرسال الصورة');
+            loadChatMessages(currentChatUser.uid);
+        }
+    }
+    input.value = '';
+}
+
+// ==================== Infinite Scroll - Core Functions ====================
+async function loadAllTweetsToCache() {
+    const feedContainer = document.getElementById('feedContainer');
+    if (!feedContainer) return;
+    
+    const snapshot = await db.ref('tweets').once('value');
+    const tweets = snapshot.val();
+    
+    if (!tweets || Object.keys(tweets).length === 0) {
+        feedContainer.innerHTML = '<div style="text-align: center; padding: 40px; color: #536471;">✨ لا توجد تغريدات بعد - كن أول من يغرد! ✨</div>';
+        hasMoreTweets = false;
         return;
     }
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
-        audioChunks = [];
-        mediaRecorder.ondataavailable = (event) => { audioChunks.push(event.data); };
-        mediaRecorder.onstop = async () => {
-            const audioBlob = new Blob(audioChunks, { type: 'audio/mp3' });
-            const audioFile = new File([audioBlob], 'recording.mp3', { type: 'audio/mp3' });
-            const result = await uploadMedia(audioFile);
-            if (currentChatUserId) {
-                const chatId = getChatId(currentUser.uid, currentChatUserId);
-                await push(ref(db, `private_messages/${chatId}`), { senderId: currentUser.uid, senderName: currentUserData?.name, audioUrl: result.url, type: 'audio', timestamp: Date.now() });
-                await set(ref(db, `private_chats/${currentUser.uid}/${currentChatUserId}`), { lastMessage: '🎤 رسالة صوتية', lastTimestamp: Date.now(), withUser: currentChatUserId });
-                await set(ref(db, `private_chats/${currentChatUserId}/${currentUser.uid}`), { lastMessage: '🎤 رسالة صوتية', lastTimestamp: Date.now(), withUser: currentUser.uid });
-                await loadPrivateMessages(currentChatUserId);
-            }
-            stream.getTracks().forEach(track => track.stop());
-        };
-        mediaRecorder.start();
-        if (btn) btn.innerHTML = '<i class="fas fa-stop-circle text-red-500"></i>';
-    } catch (err) { showToast('لا يمكن الوصول إلى الميكروفون'); }
-};
+    
+    let tweetsArray = Object.values(tweets).sort((a, b) => b.timestamp - a.timestamp);
+    
+    if (currentUser) {
+        const blockedSnapshot = await db.ref(`users/${currentUser.uid}/blockedUsers`).once('value');
+        const blockedUsers = blockedSnapshot.val() || {};
+        tweetsArray = tweetsArray.filter(tweet => !blockedUsers[tweet.userId]);
+    }
+    
+    allTweetsCache = tweetsArray;
+    hasMoreTweets = allTweetsCache.length > TWEETS_PER_BATCH;
+    currentDisplayCount = TWEETS_PER_BATCH;
+    
+    feedContainer.innerHTML = '';
+    await displayTweets(0, TWEETS_PER_BATCH);
+    
+    if (scrollListenerActive) {
+        setupSmoothScrollListener();
+    }
+}
 
-// ========== STORIES ==========
-onValue(ref(db, 'stories'), (s) => {
-    const data = s.val();
-    const now = Date.now();
-    const activeStories = [];
-    if (data) {
-        Object.keys(data).forEach(key => {
-            const story = data[key];
-            if (story.timestamp && (now - story.timestamp) < 24*60*60*1000) activeStories.push({ id: key, ...story });
+async function displayTweets(startIndex, count) {
+    const feedContainer = document.getElementById('feedContainer');
+    if (!feedContainer) return;
+    
+    const endIndex = Math.min(startIndex + count, allTweetsCache.length);
+    const tweetsToShow = allTweetsCache.slice(startIndex, endIndex);
+    
+    for (const tweet of tweetsToShow) {
+        const tweetHtml = await createTweetCard(tweet);
+        feedContainer.insertAdjacentHTML('beforeend', tweetHtml);
+    }
+    
+    if (hasMoreTweets && endIndex < allTweetsCache.length) {
+        let loadMoreDiv = document.getElementById('loadMoreTrigger');
+        if (!loadMoreDiv) {
+            loadMoreDiv = document.createElement('div');
+            loadMoreDiv.id = 'loadMoreTrigger';
+            loadMoreDiv.className = 'load-more-btn';
+            loadMoreDiv.innerHTML = 'جاري تحميل المزيد...';
+            loadMoreDiv.style.display = 'none';
+            feedContainer.appendChild(loadMoreDiv);
+        }
+    } else if (allTweetsCache.length > 0 && endIndex >= allTweetsCache.length) {
+        const loadMoreDiv = document.getElementById('loadMoreTrigger');
+        if (loadMoreDiv) loadMoreDiv.remove();
+        const endMessage = document.createElement('div');
+        endMessage.style.textAlign = 'center';
+        endMessage.style.padding = '20px';
+        endMessage.style.color = '#536471';
+        endMessage.innerHTML = '✨ لقد وصلت إلى النهاية ✨';
+        feedContainer.appendChild(endMessage);
+    }
+}
+
+async function createTweetCard(tweet) {
+    const userInfoSnapshot = await db.ref(`users/${tweet.userId}`).once('value');
+    const userInfo = userInfoSnapshot.val();
+    const isUserVerified = userInfo?.verified || false;
+    const isLiked = tweet.likes && tweet.likes[currentUser?.uid];
+    const isRetweeted = tweet.retweets && tweet.retweets[currentUser?.uid];
+    const likesCount = tweet.likes ? Object.keys(tweet.likes).length : 0;
+    const retweetsCount = tweet.retweets ? Object.keys(tweet.retweets).length : 0;
+    const isOwner = tweet.userId === currentUser?.uid;
+    
+    let formattedText = escapeHtml(tweet.text);
+    if (tweet.hashtags) {
+        tweet.hashtags.forEach(tag => {
+            const regex = new RegExp(`#${tag}`, 'gi');
+            formattedText = formattedText.replace(regex, `<span style="color: #1D9BF0; cursor: pointer;" onclick="event.stopPropagation(); searchHashtag('${tag}')">#${tag}</span>`);
         });
     }
-    renderStories(activeStories);
-});
-
-function renderStories(stories) {
-    const container = document.getElementById('storiesList');
-    if (!container) return;
-    container.innerHTML = `<div class="story-card" onclick="addStory()"><div class="add-story-btn"><i class="fas fa-plus"></i></div><div class="story-name">أضف قصة</div></div>`;
-    stories.forEach(story => {
-        const user = allUsers[story.sender] || { name: 'مستخدم', avatarUrl: '' };
-        container.innerHTML += `
-            <div class="story-card" onclick="window.open('${story.mediaUrl}','_blank')">
-                <div class="story-ring"><img class="story-avatar" src="${user.avatarUrl || 'https://via.placeholder.com/80'}"></div>
-                <div class="story-name">${escapeHtml(user.name)}</div>
-            </div>
-        `;
-    });
-}
-
-window.openStories = function() {
-    document.getElementById('storiesPanel').classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-};
-
-window.closeStories = function() {
-    document.getElementById('storiesPanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
-
-window.addStory = async function() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*,video/*';
-    input.onchange = async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        const result = await uploadMedia(file);
-        await push(ref(db, 'stories'), { mediaUrl: result.url, mediaType: result.type, sender: currentUser.uid, timestamp: Date.now() });
-        showToast('✅ تم إضافة القصة');
-    };
-    input.click();
-};
-
-// ========== SEARCH ==========
-window.openSearch = function() {
-    document.getElementById('searchPanel').classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-};
-
-window.closeSearch = function() {
-    document.getElementById('searchPanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
-
-window.searchAll = function() {
-    const query = document.getElementById('searchInput').value.toLowerCase();
-    const resultsDiv = document.getElementById('searchResults');
-    if (!resultsDiv) return;
-    if (!query) { resultsDiv.innerHTML = ''; return; }
-    const users = Object.values(allUsers).filter(u => u.name?.toLowerCase().includes(query));
-    resultsDiv.innerHTML = users.map(u => `<div class="search-result" onclick="viewProfile('${u.uid}')"><div class="w-10 h-10 rounded-full bg-[#1d9bf0] overflow-hidden flex items-center justify-center">${u.avatarUrl ? `<img src="${u.avatarUrl}">` : (u.name?.charAt(0) || 'U')}</div><div><div class="font-bold">${escapeHtml(u.name)}</div><div class="text-sm text-gray-500">@${u.name?.toLowerCase().replace(/\s/g, '')}</div></div></div>`).join('');
-    if (users.length === 0) resultsDiv.innerHTML = '<div class="text-center text-gray-500 py-10">لا توجد نتائج</div>';
-};
-
-// ========== ADMIN ==========
-window.openAdmin = async function() {
-    if (!isAdmin) return;
-    const statsDiv = document.getElementById('adminStats');
-    const usersListDiv = document.getElementById('adminUsersList');
-    const postsListDiv = document.getElementById('adminPostsList');
     
-    const totalUsers = Object.keys(allUsers).length;
-    const totalPosts = allPosts.length;
-    const totalLikes = allPosts.reduce((s,p)=>s+(p.likes||0),0);
-    const totalComments = allPosts.reduce((s,p)=>s+(p.comments ? Object.keys(p.comments).length : 0),0);
-    
-    if (statsDiv) {
-        statsDiv.innerHTML = `
-            <div class="admin-stat">
-                <div class="admin-stat-icon"><i class="fas fa-users"></i></div>
-                <div class="admin-stat-number">${totalUsers}</div>
-                <div class="admin-stat-label">مستخدمين</div>
-            </div>
-            <div class="admin-stat">
-                <div class="admin-stat-icon"><i class="fas fa-file-alt"></i></div>
-                <div class="admin-stat-number">${totalPosts}</div>
-                <div class="admin-stat-label">منشورات</div>
-            </div>
-            <div class="admin-stat">
-                <div class="admin-stat-icon"><i class="fas fa-heart text-pink-500"></i></div>
-                <div class="admin-stat-number">${totalLikes}</div>
-                <div class="admin-stat-label">إعجابات</div>
-            </div>
-            <div class="admin-stat">
-                <div class="admin-stat-icon"><i class="fas fa-comment text-blue-500"></i></div>
-                <div class="admin-stat-number">${totalComments}</div>
-                <div class="admin-stat-label">تعليقات</div>
-            </div>
-        `;
+    let mediaHtml = '';
+    if (tweet.mediaUrl) {
+        if (tweet.mediaType === 'image') {
+            mediaHtml = `<div class="post-media" onclick="event.stopPropagation(); openMediaViewer('${tweet.mediaUrl}', 'image')"><img src="${tweet.mediaUrl}" loading="lazy"></div>`;
+        } else if (tweet.mediaType === 'video') {
+            mediaHtml = `<div class="post-media" onclick="event.stopPropagation(); openMediaViewer('${tweet.mediaUrl}', 'video')"><video src="${tweet.mediaUrl}" preload="metadata"></video></div>`;
+        }
     }
     
-    if (usersListDiv) {
-        usersListDiv.innerHTML = '';
-        Object.entries(allUsers).forEach(([uid, u]) => {
-            if (uid !== currentUser.uid) {
-                usersListDiv.innerHTML += `
+    return `
+        <div class="post-card fade-in" data-tweet-id="${tweet.id}">
+            <div class="post-header">
+                <div class="post-avatar" onclick="event.stopPropagation(); openProfile('${tweet.userId}')">
+                    ${tweet.userAvatar ? `<img src="${tweet.userAvatar}">` : '<i class="fa-solid fa-user text-white"></i>'}
+                </div>
+                <div class="post-content">
+                    <div class="post-user-info">
+                        <span class="post-name" onclick="event.stopPropagation(); openProfile('${tweet.userId}')">${escapeHtml(tweet.userName)}</span>
+                        ${isUserVerified ? '<i class="fa-solid fa-circle-check verified-badge"></i>' : ''}
+                        <span class="post-username">@${escapeHtml(tweet.userName)}</span>
+                        <span class="post-time">· ${formatTime(tweet.timestamp)}</span>
+                        ${(isOwner || currentUser?.isAdmin) ? `<button class="post-action" onclick="event.stopPropagation(); deleteTweet('${tweet.id}')" style="margin-right: auto;"><i class="fa-regular fa-trash-can"></i></button>` : ''}
+                    </div>
+                    <div class="post-text" onclick="openComments('${tweet.id}')">${formattedText}</div>
+                    ${mediaHtml}
+                    <div class="post-actions">
+                        <button class="post-action" onclick="event.stopPropagation(); openComments('${tweet.id}')">
+                            <i class="fa-regular fa-comment"></i> <span>${tweet.commentsCount || 0}</span>
+                        </button>
+                        <button class="post-action ${isRetweeted ? 'retweeted' : ''}" onclick="event.stopPropagation(); retweet('${tweet.id}')">
+                            <i class="fa-solid fa-retweet"></i> <span>${retweetsCount}</span>
+                        </button>
+                        <button class="post-action ${isLiked ? 'liked' : ''}" onclick="event.stopPropagation(); likeTweet('${tweet.id}')">
+                            <i class="fa-regular fa-heart"></i> <span>${likesCount}</span>
+                        </button>
+                        <button class="post-action" onclick="event.stopPropagation(); shareTweet('${tweet.id}')">
+                            <i class="fa-regular fa-share-from-square"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function shareTweet(tweetId) {
+    const url = `${window.location.origin}?tweet=${tweetId}`;
+    navigator.clipboard.writeText(url);
+    showToast('🔗 تم نسخ رابط التغريدة');
+}
+
+async function loadMoreTweets() {
+    if (isLoadingMore || !hasMoreTweets) return;
+    
+    isLoadingMore = true;
+    const loadMoreDiv = document.getElementById('loadMoreTrigger');
+    if (loadMoreDiv) loadMoreDiv.style.display = 'block';
+    
+    await new Promise(resolve => setTimeout(resolve, 200));
+    
+    const startIndex = currentDisplayCount;
+    const newEndIndex = Math.min(startIndex + TWEETS_PER_BATCH, allTweetsCache.length);
+    
+    if (startIndex < allTweetsCache.length) {
+        await displayTweets(startIndex, TWEETS_PER_BATCH);
+        currentDisplayCount = newEndIndex;
+        hasMoreTweets = currentDisplayCount < allTweetsCache.length;
+    } else {
+        hasMoreTweets = false;
+    }
+    
+    if (loadMoreDiv) loadMoreDiv.style.display = 'none';
+    isLoadingMore = false;
+}
+
+function setupSmoothScrollListener() {
+    const handleScroll = () => {
+        if (isLoadingMore || !hasMoreTweets) return;
+        
+        const scrollPosition = window.innerHeight + window.scrollY;
+        const threshold = document.body.offsetHeight - 500;
+        
+        if (scrollPosition >= threshold) {
+            loadMoreTweets();
+        }
+    };
+    
+    window.removeEventListener('scroll', handleScroll);
+    window.addEventListener('scroll', handleScroll, { passive: true });
+}
+
+async function refreshFeedCache() {
+    if (!currentUser) return;
+    
+    const snapshot = await db.ref('tweets').once('value');
+    const tweets = snapshot.val();
+    
+    if (!tweets || Object.keys(tweets).length === 0) {
+        allTweetsCache = [];
+        hasMoreTweets = false;
+        currentDisplayCount = 0;
+        const feedContainer = document.getElementById('feedContainer');
+        if (feedContainer) {
+            feedContainer.innerHTML = '<div style="text-align: center; padding: 40px; color: #536471;">✨ لا توجد تغريدات بعد - كن أول من يغرد! ✨</div>';
+        }
+        return;
+    }
+    
+    let tweetsArray = Object.values(tweets).sort((a, b) => b.timestamp - a.timestamp);
+    
+    const blockedSnapshot = await db.ref(`users/${currentUser.uid}/blockedUsers`).once('value');
+    const blockedUsers = blockedSnapshot.val() || {};
+    tweetsArray = tweetsArray.filter(tweet => !blockedUsers[tweet.userId]);
+    
+    allTweetsCache = tweetsArray;
+    hasMoreTweets = allTweetsCache.length > TWEETS_PER_BATCH;
+    currentDisplayCount = Math.min(TWEETS_PER_BATCH, allTweetsCache.length);
+    
+    const feedContainer = document.getElementById('feedContainer');
+    if (feedContainer) {
+        feedContainer.innerHTML = '';
+        await displayTweets(0, currentDisplayCount);
+    }
+}
+
+function resetInfiniteScroll() {
+    isLoadingMore = false;
+    hasMoreTweets = true;
+    allTweetsCache = [];
+    currentDisplayCount = 0;
+    scrollListenerActive = true;
+}
+
+async function loadFeed() {
+    await loadAllTweetsToCache();
+}
+
+// ==================== Admin Panel ====================
+async function openAdminPanel() {
+    if (currentUser.email !== ADMIN_EMAIL && !currentUser.isAdmin) return showToast('🚫 غير مصرح لك');
+    showToast('🔧 جاري تحميل لوحة التحكم...');
+    
+    const badWordsSnapshot = await db.ref('badWords').once('value');
+    const badWords = badWordsSnapshot.val();
+    const badWordsContainer = document.getElementById('adminBadWordsList');
+    if (badWordsContainer) {
+        if (!badWords) {
+            badWordsContainer.innerHTML = '<div style="padding: 12px; color: #536471;">📝 لا توجد كلمات ممنوعة</div>';
+        } else {
+            let html = '';
+            for (const [id, word] of Object.entries(badWords)) {
+                html += `
                     <div class="admin-item">
-                        <div class="admin-item-info">
-                            <div class="admin-item-name">${escapeHtml(u.name)}</div>
-                            <div class="admin-item-email">${u.email}</div>
-                        </div>
-                        <button class="admin-delete-btn" onclick="adminDeleteUser('${uid}')"><i class="fas fa-trash"></i> حذف</button>
+                        <div><span class="admin-item-name">🚫 ${escapeHtml(word)}</span></div>
+                        <button class="admin-delete-btn" onclick="removeBadWord('${id}', '${word}')">حذف</button>
                     </div>
                 `;
             }
-        });
-        if (usersListDiv.innerHTML === '') usersListDiv.innerHTML = '<div class="text-center text-gray-500 py-10">لا يوجد مستخدمين آخرين</div>';
+            badWordsContainer.innerHTML = html;
+        }
     }
     
-    if (postsListDiv) {
-        postsListDiv.innerHTML = '';
-        allPosts.slice(0, 30).forEach(post => {
-            postsListDiv.innerHTML += `
-                <div class="admin-item">
-                    <div class="admin-item-info">
-                        <div class="admin-item-name">${escapeHtml(post.senderName || 'مستخدم')}</div>
-                        <div class="admin-item-text">${post.text?.substring(0, 60) || 'منشور بدون نص'}</div>
-                        <div class="admin-item-email">${new Date(post.timestamp).toLocaleString()}</div>
+    const usersSnapshot = await db.ref('users').once('value');
+    const tweetsSnapshot = await db.ref('tweets').once('value');
+    const usersCount = usersSnapshot.exists() ? Object.keys(usersSnapshot.val()).length : 0;
+    const tweetsCount = tweetsSnapshot.exists() ? Object.keys(tweetsSnapshot.val()).length : 0;
+    document.getElementById('adminUsersCount').textContent = usersCount;
+    document.getElementById('adminTweetsCount').textContent = tweetsCount;
+    
+    let usersHtml = '';
+    if (usersSnapshot.exists()) {
+        for (const [uid, user] of Object.entries(usersSnapshot.val())) {
+            if (uid !== currentUser.uid) {
+                usersHtml += `
+                    <div class="admin-item">
+                        <div>
+                            <div class="admin-item-name">${escapeHtml(user.name)}</div>
+                            <div class="admin-item-email">${escapeHtml(user.email)}</div>
+                        </div>
+                        <div>
+                            ${!user.verified ? `<button class="admin-verify-btn" onclick="verifyUser('${uid}')">✅ توثيق</button>` : '<span style="color: #00BA7C;">✅ موثق</span>'}
+                            <button class="admin-delete-btn" onclick="deleteUser('${uid}')">🗑️ حذف</button>
+                        </div>
                     </div>
-                    <button class="admin-delete-btn" onclick="adminDeletePost('${post.id}')"><i class="fas fa-trash"></i> حذف</button>
-                </div>
-            `;
-        });
-        if (postsListDiv.innerHTML === '') postsListDiv.innerHTML = '<div class="text-center text-gray-500 py-10">لا توجد منشورات</div>';
+                `;
+            }
+        }
     }
+    document.getElementById('adminUsersList').innerHTML = usersHtml || '<div style="padding: 12px; color: #536471;">لا يوجد مستخدمين</div>';
     
     document.getElementById('adminPanel').classList.add('open');
-    document.getElementById('backBtn').style.display = 'flex';
-};
+}
 
-window.closeAdmin = function() {
+function closeAdmin() {
     document.getElementById('adminPanel').classList.remove('open');
-    if (!document.querySelector('.panel.open')) document.getElementById('backBtn').style.display = 'none';
-};
+}
 
-window.adminDeleteUser = async function(userId) {
-    if (!isAdmin || !confirm('⚠️ حذف هذا المستخدم وجميع منشوراته؟')) return;
-    const posts = allPosts.filter(p => p.sender === userId);
-    for (const post of posts) await set(ref(db, `posts/${post.id}`), null);
-    await set(ref(db, `users/${userId}`), null);
-    showToast('✅ تم حذف المستخدم');
-    location.reload();
-};
+async function verifyUser(userId) {
+    await db.ref(`users/${userId}`).update({ verified: true });
+    showToast('✅ تم توثيق المستخدم');
+    if (currentProfileUser === userId) openProfile(userId);
+    refreshFeedCache();
+    openAdminPanel();
+}
 
-window.adminDeletePost = async function(postId) {
-    if (!isAdmin || !confirm('⚠️ حذف هذا المنشور؟')) return;
-    await set(ref(db, `posts/${postId}`), null);
-    showToast('✅ تم حذف المنشور');
-    renderFeed();
-};
-
-// ========== NAVIGATION ==========
-window.switchTab = function(tab) {
-    const navItems = document.querySelectorAll('.nav-item');
-    navItems.forEach(t => t.classList.remove('active'));
-    if (event && event.target) {
-        const clicked = event.target.closest('.nav-item');
-        if (clicked) clicked.classList.add('active');
+async function deleteUser(userId) {
+    if (confirm('⚠️ هل أنت متأكد من حذف هذا المستخدم نهائياً؟')) {
+        await db.ref(`users/${userId}`).remove();
+        showToast('🗑️ تم حذف المستخدم');
+        openAdminPanel();
+        refreshFeedCache();
     }
+}
+
+// ==================== Close Functions ====================
+function closeCompose() {
+    document.getElementById('composeModal').classList.remove('open');
+    document.getElementById('composeText').value = '';
+    removeComposeMedia();
+    tweetMediaFile = null;
+}
+
+function openCompose() {
+    document.getElementById('composeModal').classList.add('open');
+}
+
+function goToHome() {
+    refreshFeedCache();
+}
+
+function switchTab(tab) {
     if (tab === 'home') {
-        closeCompose(); closeProfile(); closeChat(); closeConversations(); 
-        closeNotifications(); closeSearch(); closeStories(); closeComments(); 
-        closeFollowers(); closeAdmin(); closeEditProfileModal();
+        refreshFeedCache();
     }
-};
+}
 
-window.goToHome = function() { 
-    const homeBtn = document.querySelector('.nav-item i.fa-home')?.closest('.nav-item');
-    if (homeBtn) {
-        document.querySelectorAll('.nav-item').forEach(t => t.classList.remove('active'));
-        homeBtn.classList.add('active');
+// ==================== Last Seen Update ====================
+setInterval(async () => {
+    if (currentUser) await db.ref(`users/${currentUser.uid}/lastSeen`).set(Date.now());
+}, 60000);
+
+// ==================== Auth State Listener ====================
+const initLoader = document.getElementById('initLoader');
+
+auth.onAuthStateChanged(async (user) => {
+    if (initLoader) {
+        setTimeout(() => {
+            initLoader.style.opacity = '0';
+            setTimeout(() => {
+                if (initLoader) initLoader.style.display = 'none';
+            }, 300);
+        }, 500);
     }
-    closeCompose(); closeProfile(); closeChat(); closeConversations(); 
-    closeNotifications(); closeSearch(); closeStories(); closeComments(); 
-    closeFollowers(); closeAdmin(); closeEditProfileModal();
-    document.getElementById('backBtn').style.display = 'none'; 
-};
-
-window.goBack = function() {
-    if (document.getElementById('commentsPanel')?.classList.contains('open')) closeComments();
-    else if (document.getElementById('profilePanel')?.classList.contains('open')) closeProfile();
-    else if (document.getElementById('chatPanel')?.classList.contains('open')) closeChat();
-    else if (document.getElementById('conversationsPanel')?.classList.contains('open')) closeConversations();
-    else if (document.getElementById('notificationsPanel')?.classList.contains('open')) closeNotifications();
-    else if (document.getElementById('searchPanel')?.classList.contains('open')) closeSearch();
-    else if (document.getElementById('storiesPanel')?.classList.contains('open')) closeStories();
-    else if (document.getElementById('followersPanel')?.classList.contains('open')) closeFollowers();
-    else if (document.getElementById('adminPanel')?.classList.contains('open')) closeAdmin();
-    else if (document.getElementById('composePanel')?.classList.contains('open')) closeCompose();
-    else if (document.getElementById('editProfileModal')?.classList.contains('open')) closeEditProfileModal();
-    else goToHome();
-};
-
-window.toggleTheme = function() {
-    document.body.classList.toggle('light-mode');
-    localStorage.setItem('theme', document.body.classList.contains('light-mode') ? 'light' : 'dark');
-};
-
-// ========== AUTH STATE ==========
-onAuthStateChanged(auth, async (user) => {
+    
     if (user) {
         currentUser = user;
-        await loadUserData();
-        isAdmin = ADMIN_EMAILS.includes(currentUser.email);
-        document.getElementById('authScreen').style.display = 'none';
+        const snapshot = await db.ref(`users/${user.uid}`).once('value');
+        if (snapshot.exists()) {
+            currentUser = { ...currentUser, ...snapshot.val() };
+        } else {
+            await db.ref(`users/${user.uid}`).set({
+                uid: user.uid,
+                name: user.displayName || user.email.split('@')[0],
+                email: user.email,
+                bio: "مرحباً! أنا في XSphere ✨",
+                avatar: "",
+                cover: "",
+                website: "",
+                verified: false,
+                isAdmin: user.email === ADMIN_EMAIL,
+                blockedUsers: {},
+                createdAt: Date.now()
+            });
+            currentUser.isAdmin = user.email === ADMIN_EMAIL;
+        }
+        
         document.getElementById('mainApp').style.display = 'block';
-        updateNotificationBadge();
-        if (localStorage.getItem('theme') === 'light') document.body.classList.add('light-mode');
-        showToast(`👋 مرحباً ${currentUserData?.name || 'مستخدم'}`);
+        
+        const avatarDiv = document.getElementById('currentUserAvatar');
+        if (avatarDiv && currentUser.avatar) {
+            avatarDiv.innerHTML = `<img src="${currentUser.avatar}">`;
+        }
+        
+        if (currentUser.isAdmin) {
+            const adminItem = document.getElementById('adminSidebarItem');
+            if (adminItem) adminItem.style.display = 'flex';
+        }
+        
+        await loadBadWordsList();
+        resetInfiniteScroll();
+        await loadFeed();
+        loadNotifications();
+        loadTrendingHashtags();
+        loadSuggestions();
+        
+        const savedTheme = localStorage.getItem('theme');
+        if (savedTheme === 'dark') document.body.classList.add('dark-mode');
+        
     } else {
-        document.getElementById('authScreen').style.display = 'flex';
-        document.getElementById('mainApp').style.display = 'none';
+        // المستخدم غير مسجل الدخول - التوجيه إلى صفحة التسجيل
+        window.location.href = 'auth.html';
     }
 });
-
-console.log('✅ Nexus Platform Ready');
