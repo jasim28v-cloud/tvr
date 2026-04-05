@@ -1,24 +1,33 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js";
-import { getAuth } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-auth.js";
-import { getDatabase, ref, push, set, onValue, update, get, child, remove } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js";
-
+// ==================== XSphere - Firebase Configuration ====================
 const firebaseConfig = {
-    apiKey: "AIzaSyC8rvv7OihIJbTPz8wLNPPEURP6HeGXPos",
-    authDomain: "coco-989ec.firebaseapp.com",
-    databaseURL: "https://coco-989ec-default-rtdb.firebaseio.com",
-    projectId: "coco-989ec",
-    storageBucket: "coco-989ec.firebasestorage.app",
-    messagingSenderId: "476879537305",
-    appId: "1:476879537305:web:4bd41c433cb4a1efba6408"
+    apiKey: "AIzaSyD6onUYeql3oDrJLOzWW7vb0ZbmXuzeHr4",
+    authDomain: "dokx-e56ad.firebaseapp.com",
+    databaseURL: "https://dokx-e56ad-default-rtdb.firebaseio.com/",
+    projectId: "dokx-e56ad",
+    storageBucket: "dokx-e56ad.firebasestorage.app",
+    appId: "1:1027440008351:web:b83592ac261e8c2782d6aa"
 };
 
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getDatabase(app);
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
 
-export { ref, push, set, onValue, update, get, child, remove };
+// Services
+const auth = firebase.auth();
+const db = firebase.database();
+const storage = firebase.storage();
 
-export const CLOUD_NAME = 'dnmpmysk6';
-export const UPLOAD_PRESET = 'do_2gg';
+// Cloudinary
+const CLOUD_NAME = 'dkredfmfe';
+const UPLOAD_PRESET = 'for_5g';
 
-console.log('✅ Firebase Ready - Nexus Platform');
+// Agora
+const AGORA_APP_ID = '929646610d814d529a06c4081c81325f';
+
+// Admin Account
+const ADMIN_EMAIL = 'jasim88v@gmail.com';
+const ADMIN_PASSWORD = 'kk2314kk';
+
+// Site Name
+const SITE_NAME = 'XSphere';
+
+console.log('✅ XSphere - Firebase, Cloudinary & Agora Ready');
