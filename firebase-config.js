@@ -1,11 +1,11 @@
 // ==================== XSphere - Firebase Configuration ====================
 const firebaseConfig = {
-    apiKey: "AIzaSyC8u6Us6ZvnD4pjYxzRmK0UcwOJAvh1ZCU",
-    authDomain: "mnsx-23109.firebaseapp.com",
-    databaseURL: "https://mnsx-23109-default-rtdb.firebaseio.com/",
-    projectId: "mnsx-23109",
-    storageBucket: "mnsx-23109.firebasestorage.app",
-    appId: "1:1035746353339:web:eec9d447b4379dfa1dc99e"
+    apiKey: "AIzaSyD6onUYeql3oDrJLOzWW7vb0ZbmXuzeHr4",
+    authDomain: "dokx-e56ad.firebaseapp.com",
+    databaseURL: "https://dokx-e56ad-default-rtdb.firebaseio.com/",
+    projectId: "dokx-e56ad",
+    storageBucket: "dokx-e56ad.firebasestorage.app",
+    appId: "1:1027440008351:web:b83592ac261e8c2782d6aa"
 };
 
 // Initialize Firebase
@@ -17,8 +17,8 @@ const db = firebase.database();
 const storage = firebase.storage();
 
 // Cloudinary
-const CLOUD_NAME = 'da457cqma';
-const UPLOAD_PRESET = 'do33_x';
+const CLOUD_NAME = 'dkredfmfe';
+const UPLOAD_PRESET = 'for_5g';
 
 // Agora
 const AGORA_APP_ID = '929646610d814d529a06c4081c81325f';
